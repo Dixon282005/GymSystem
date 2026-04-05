@@ -5,7 +5,7 @@ import traceback
 
 import flet as ft
 from app import GymsisApp
-from core.db_store import bootstrap_database, hydrate_mock_data_from_db
+from core.db_store import bootstrap_database, hydrate_mock_data_from_db, expire_memberships
 from core.env_loader import load_env_file
 
 
@@ -13,6 +13,17 @@ def main(page: ft.Page):
     try:
         bootstrap_database()
         hydrate_mock_data_from_db()
+
+        # Run auto-expiration at startup
+        try:
+            from core.mock_data import APP_SETTINGS
+            grace = int(APP_SETTINGS.get("moroso_grace_days", 0))
+            changed = expire_memberships(grace_days=grace)
+            if changed:
+                print(f"[Gymsis] Auto-expiración: {len(changed)} membresías actualizadas al iniciar.")
+        except Exception as exp_err:
+            print(f"[Gymsis] Auto-expiración falló: {exp_err}")
+
         app = GymsisApp(page)
         app.show_login()
     except Exception as exc:
@@ -52,7 +63,6 @@ if __name__ == "__main__":
         elif renderer_name == "auto":
             web_renderer = ft.WebRenderer.AUTO
         else:
-            # Flet 0.84 has no HTML renderer; AUTO is the widest-compatible fallback.
             web_renderer = ft.WebRenderer.AUTO
 
         ft.run(

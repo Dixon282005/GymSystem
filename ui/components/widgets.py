@@ -73,7 +73,6 @@ class LiveClock(ft.Container):
 
     def __init__(self):
         self._running = False
-        self._clock_thread = None
         self.time_text = ft.Text("", size=FONT_SIZE_MD, color=TEXT_SECONDARY, weight="w500")
         super().__init__(
             content=self.time_text,
@@ -82,11 +81,9 @@ class LiveClock(ft.Container):
         self._set_now()
 
     def did_mount(self):
-        import threading
-
         self._running = True
-        self._clock_thread = threading.Thread(target=self._run_clock, daemon=True)
-        self._clock_thread.start()
+        if self.page:
+            self.page.run_task(self._run_clock)
 
     def will_unmount(self):
         self._running = False
@@ -97,17 +94,17 @@ class LiveClock(ft.Container):
         now = datetime.now()
         self.time_text.value = now.strftime("%H:%M:%S")
 
-    def _run_clock(self):
-        import time
+    async def _run_clock(self):
+        import asyncio
 
         while self._running:
             self._set_now()
             try:
-                self.update()
+                self.time_text.update()
             except Exception:
                 self._running = False
                 break
-            time.sleep(1)
+            await asyncio.sleep(1)
 
 
 class GlobalSearch(ft.TextField):

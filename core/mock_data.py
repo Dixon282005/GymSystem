@@ -85,8 +85,8 @@ MEMBERS = [
 ]
 
 PLANS = {
-    "VIP": {"precio": 50.00, "descripcion": "Acceso total + clases grupales"},
-    "Basico": {"precio": 25.00, "descripcion": "Acceso a sala de musculacion"},
+    "VIP": {"precio": 50.00, "descripcion": "Acceso total + clases grupales", "dias": 30},
+    "Basico": {"precio": 25.00, "descripcion": "Acceso a sala de musculacion", "dias": 30},
 }
 
 POS_PRODUCTS = [
@@ -137,6 +137,8 @@ DAILY_SALES = [
     {"producto": "Agua 500ml x2", "monto": 3.00, "hora": "08:16"},
     {"producto": "Pase Diario - Visitante", "monto": 5.00, "hora": "09:00"},
 ]
+
+MEMBERSHIP_PAYMENTS: list[dict] = []
 
 APP_SETTINGS = {
     "gym_name": "Gymsis",
@@ -194,13 +196,14 @@ def register_member(cedula, nombre, plan, nfc_id):
     if normalized in MEMBER_BY_CEDULA:
         raise ValueError("La cedula ya existe")
 
-    from datetime import datetime, timedelta
+    plan_info = PLANS.get(plan, PLANS.get("Basico"))
+    dias = plan_info.get("dias", 30) if plan_info else 30
 
     new_member = {
         "cedula": normalized,
         "nombre": (nombre or "").strip(),
         "plan": (plan or "Basico").strip() or "Basico",
-        "vencimiento": (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"),
+        "vencimiento": (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d"),
         "estado": "Activo",
         "nfc_id": (nfc_id or "").strip().upper() or f"NFC-{len(MEMBERS) + 1:04d}",
         "entrenando": False,

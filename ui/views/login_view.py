@@ -10,18 +10,23 @@ from core.theme import (
 
 
 class LoginView(ft.Row):
-    """Perfectly centered login card with cedula input and NFC validation."""
+    """Centered single sign-in form for staff/admin."""
 
     def __init__(self, on_login=None):
         self._on_login = on_login
-        self.cedula_input = ft.TextField(
-            label="Cedula de Identidad",
-            hint_text="Ej: V-12345678",
-            bgcolor=BG_INPUT,
-            color=TEXT_PRIMARY,
-            border_color=BORDER,
-            border_radius=RADIUS_SM,
-            text_size=FONT_SIZE_MD,
+        self.user_input = ft.TextField(
+            label="Usuario",
+            hint_text="admin",
+            bgcolor=BG_INPUT, color=TEXT_PRIMARY, border_color=BORDER,
+            border_radius=RADIUS_SM, text_size=FONT_SIZE_MD,
+            width=320,
+        )
+        self.password_input = ft.TextField(
+            label="Clave",
+            password=True,
+            can_reveal_password=True,
+            bgcolor=BG_INPUT, color=TEXT_PRIMARY, border_color=BORDER,
+            border_radius=RADIUS_SM, text_size=FONT_SIZE_MD,
             width=320,
             on_submit=self._handle_login,
         )
@@ -35,15 +40,16 @@ class LoginView(ft.Row):
                         controls=[
                             ft.Icon(ft.Icons.SPORTS_GYMNASTICS, size=48, color=ACCENT_PRIMARY),
                             ft.Text("Gymsis", size=FONT_SIZE_2XL, color=TEXT_PRIMARY, weight="w700"),
-                            ft.Text("Sistema de Gestion de Gimnasio", size=FONT_SIZE_SM, color=TEXT_SECONDARY),
+                            ft.Text("Iniciar sesion", size=FONT_SIZE_SM, color=TEXT_SECONDARY),
                             ft.Container(height=24),
-                            self.cedula_input,
+                            self.user_input,
+                            self.password_input,
                             ft.Container(height=8),
                             ft.ElevatedButton(
                                 content=ft.Row(
                                     controls=[
-                                        ft.Icon(ft.Icons.NFC, size=18, color=TEXT_PRIMARY),
-                                        ft.Text("Validar / Escanear NFC", size=FONT_SIZE_SM, weight="w600", color=TEXT_PRIMARY),
+                                        ft.Icon(ft.Icons.LOGIN, size=18, color=TEXT_PRIMARY),
+                                        ft.Text("Iniciar sesion", size=FONT_SIZE_SM, weight="w600", color=TEXT_PRIMARY),
                                     ],
                                     alignment=ft.MainAxisAlignment.CENTER,
                                     spacing=8,
@@ -57,30 +63,8 @@ class LoginView(ft.Row):
                                     shape=ft.RoundedRectangleBorder(radius=RADIUS_SM),
                                 ),
                             ),
+                            ft.Text("Admin por defecto: admin / admin123", size=FONT_SIZE_SM, color=TEXT_MUTED),
                             ft.Container(height=8),
-                            ft.OutlinedButton(
-                                content=ft.Row(
-                                    controls=[
-                                        ft.Icon(ft.Icons.VISIBILITY, size=18, color=TEXT_SECONDARY),
-                                        ft.Text("Entrar en Modo Demo", size=FONT_SIZE_SM, weight="w600", color=TEXT_SECONDARY),
-                                    ],
-                                    alignment=ft.MainAxisAlignment.CENTER,
-                                    spacing=8,
-                                ),
-                                width=320,
-                                style=ft.ButtonStyle(
-                                    side=ft.BorderSide(1, BORDER),
-                                    shape=ft.RoundedRectangleBorder(radius=RADIUS_SM),
-                                    padding=14,
-                                ),
-                                on_click=self._handle_demo_login,
-                            ),
-                            ft.Text(
-                                "Tip: tambien puedes ingresar DEMO o TEST en la cedula.",
-                                size=FONT_SIZE_SM,
-                                color=TEXT_MUTED,
-                            ),
-                            ft.Container(height=12),
                             self.status_text,
                         ],
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -96,17 +80,14 @@ class LoginView(ft.Row):
         )
 
     def _handle_login(self, e):
-        cedula = self.cedula_input.value.strip()
-        if not cedula:
-            self.status_text.value = "Ingresa una cedula valida"
+        username = (self.user_input.value or "").strip()
+        password = (self.password_input.value or "").strip()
+        if not username or not password:
+            self.status_text.value = "Ingresa usuario y clave"
             self.status_text.color = "#f43f5e"
             self.status_text.visible = True
             self.status_text.update()
             return
 
         if self._on_login:
-            self._on_login(cedula)
-
-    def _handle_demo_login(self, e):
-        if self._on_login:
-            self._on_login("__DEMO__")
+            self._on_login(username, password)

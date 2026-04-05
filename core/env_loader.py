@@ -1,4 +1,4 @@
-"""Minimal .env loader for desktop/dev execution without extra dependencies."""
+"""Environment loader for desktop/dev execution."""
 
 from __future__ import annotations
 
@@ -10,6 +10,14 @@ def load_env_file(path: str = ".env") -> bool:
     env_path = Path(path)
     if not env_path.exists():
         return False
+
+    # Prefer python-dotenv when available for robust parsing.
+    try:
+        from dotenv import load_dotenv
+
+        return bool(load_dotenv(dotenv_path=env_path, override=False))
+    except Exception:
+        pass
 
     loaded = False
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():

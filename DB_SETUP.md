@@ -23,6 +23,8 @@ Archivo sugerido:
 GYMSIS_RUN_MODE=desktop
 GYMSIS_USE_DB=true
 DATABASE_URL=postgresql://gymsis:gymsis_dev@localhost:5433/gymsis
+GYMSIS_ADMIN_USER=admin
+GYMSIS_ADMIN_PASSWORD=admin123
 ```
 
 Luego ejecutar la app:
@@ -54,7 +56,26 @@ Persistencia conectada desde:
 
 Si DB no esta disponible, la app sigue en modo memoria sin romperse.
 
-## 5) Apagar DB
+## 5) Login admin y permisos
+
+- Login admin por defecto: `admin / admin123`
+- Roles semilla: `admin`, `staff`, `viewer`
+- Permisos semilla:
+	- `view_dashboard`
+	- `view_access`
+	- `view_members`
+	- `view_pos`
+	- `view_settings`
+	- `manage_users`
+
+La app desktop aplica permisos en el menu lateral y en la vista de configuracion para gestion de usuarios.
+
+## 6) Arquitectura desktop (sin backend separado)
+
+En este proyecto no necesitas API backend adicional: UI, logica de negocio y acceso a DB viven en el mismo proceso de escritorio.
+PostgreSQL funciona como almacenamiento persistente central.
+
+## 7) Apagar DB
 
 ```powershell
 docker compose -f docker-compose.db.yml down
