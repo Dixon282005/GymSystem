@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gymsis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gymsis
+      POSTGRES_USER: gymsis
+      POSTGRES_PASSWORD: gymsis_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+
+  gymsis:
+    build: .
+    container_name: gymsis
+    depends_on:
+      - postgres
+    ports:
+      - "8550:8550"
+    environment:
+      GYMSIS_RUN_MODE: web
+      GYMSIS_HOST: 0.0.0.0
+      GYMSIS_PORT: "8550"
+      GYMSIS_WEB_RENDERER: canvaskit
+      GYMSIS_USE_DB: "true"
+      DATABASE_URL: postgresql://gymsis:gymsis_dev@postgres:5432/gymsis
+
+volumes:
+  postgres_data:

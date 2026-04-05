@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gymsis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gymsis
+      POSTGRES_USER: gymsis
+      POSTGRES_PASSWORD: gymsis_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  postgres_data:
