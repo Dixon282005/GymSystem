@@ -46,7 +46,7 @@ class AccessView(ft.Column):
             ),
             padding=ft.padding.symmetric(horizontal=12, vertical=6),
             bgcolor=ft.Colors.with_opacity(0.12, ACCENT_SUCCESS if nfc_reader.is_connected else ACCENT_DANGER),
-            border=ft.border.all(1, ft.Colors.with_opacity(0.3, ACCENT_SUCCESS if nfc_reader.is_connected else ACCENT_DANGER)),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.3, ACCENT_SUCCESS if nfc_reader.is_connected else ACCENT_DANGER)),
             border_radius=16,
         )
 
@@ -67,7 +67,7 @@ class AccessView(ft.Column):
             ),
             padding=14,
             bgcolor=BG_CARD,
-            border=ft.border.all(1, BORDER),
+            border=ft.Border.all(1, BORDER),
             border_radius=RADIUS_MD,
             margin=ft.margin.only(bottom=8),
         )
@@ -86,7 +86,8 @@ class AccessView(ft.Column):
             value="TODOS",
             options=[
                 ft.dropdown.Option("TODOS"),
-                ft.dropdown.Option("PERMITIDO"),
+                ft.dropdown.Option("ENTRADA"),
+                ft.dropdown.Option("SALIDA"),
                 ft.dropdown.Option("DENEGADO"),
             ],
             width=140,
@@ -200,17 +201,42 @@ class AccessView(ft.Column):
         self.status_label.value = "ACR122U Conectado" if connected else "Lector Desconectado"
         self.status_label.color = color
         self.reader_badge.bgcolor = ft.Colors.with_opacity(0.12, color)
-        self.reader_badge.border = ft.border.all(1, ft.Colors.with_opacity(0.3, color))
+        self.reader_badge.border = ft.Border.all(1, ft.Colors.with_opacity(0.3, color))
         if hasattr(self, "page") and self.page:
             try:
                 self.reader_badge.update()
             except Exception:
                 pass
 
+    def did_mount(self):
+        from core.event_bus import event_bus
+        event_bus.subscribe("access_scan", self._on_event_bus_scan)
+        event_bus.subscribe("members_changed", self._on_event_bus_members_changed)
+
+    def will_unmount(self):
+        from core.event_bus import event_bus
+        event_bus.unsubscribe("access_scan", self._on_event_bus_scan)
+        event_bus.unsubscribe("members_changed", self._on_event_bus_members_changed)
+
+    def _on_event_bus_scan(self, result: dict):
+        raw_id = result.get("event", {}).get("cedula", "")
+        self._update_ui_with_scan_result(result, raw_id)
+
+    def _on_event_bus_members_changed(self, member):
+        self._refresh_present_list()
+        self._refresh_counters()
+        if hasattr(self, "page") and self.page:
+            try:
+                self.present_column.update()
+                self.allowed_counter.update()
+                self.denied_counter.update()
+                self.events_counter.update()
+            except Exception:
+                pass
+
     def _on_nfc_scan(self, uid: str):
         """Dispatched from the background NFC worker thread when a tag is touched."""
-        result = process_nfc_scan(uid)
-        self._update_ui_with_scan_result(result, uid)
+        process_nfc_scan(uid)
 
     def _handle_manual_scan(self, e):
         raw_val = (self.sim_input.value or "").strip()
@@ -222,16 +248,28 @@ class AccessView(ft.Column):
         except Exception:
             pass
 
-        result = process_nfc_scan(raw_val)
-        self._update_ui_with_scan_result(result, raw_val)
+        process_nfc_scan(raw_val)
 
     def _update_ui_with_scan_result(self, result: dict, raw_input: str):
-        allowed = result["allowed"]
-        member = result["member"]
-        reason = result["reason"]
+        action = result.get("action", "ENTRADA" if result.get("allowed") else "DENEGADO")
+        member = result.get("member")
+        reason = result.get("reason", "")
+        nombre = member["nombre"] if member else "Tarjeta No Registrada"
+        first_name = nombre.split()[0] if member else "SOCIO"
 
-        accent = ACCENT_SUCCESS if allowed else ACCENT_DANGER
-        status_text = "ACCESO PERMITIDO" if allowed else f"DENEGADO: {reason.upper()}"
+        if action == "SALIDA":
+            accent = "#0891b2"
+            banner_icon = ft.Icons.DIRECTIONS_WALK
+            status_text = f"¡HASTA LUEGO, {first_name.upper()}!"
+        elif action == "ENTRADA":
+            accent = ACCENT_SUCCESS
+            banner_icon = ft.Icons.CHECK_CIRCLE
+            status_text = f"¡BIENVENIDO, {first_name.upper()}!"
+        else:
+            accent = ACCENT_DANGER
+            banner_icon = ft.Icons.CANCEL
+            status_text = f"DENEGADO: {reason.upper()}"
+
         nombre = member["nombre"] if member else "Tarjeta No Registrada"
         plan = member.get("plan", "-") if member else "-"
         cedula = member.get("cedula", raw_input) if member else raw_input
@@ -241,7 +279,7 @@ class AccessView(ft.Column):
             controls=[
                 ft.Container(
                     content=ft.Icon(
-                        ft.Icons.CHECK_CIRCLE if allowed else ft.Icons.CANCEL,
+                        banner_icon,
                         color=ft.Colors.WHITE,
                         size=28,
                     ),
@@ -274,7 +312,7 @@ class AccessView(ft.Column):
             spacing=14,
             alignment=ft.MainAxisAlignment.START,
         )
-        self.latest_scan_banner.border = ft.border.all(1.5, accent)
+        self.latest_scan_banner.border = ft.Border.all(1.5, accent)
         self.latest_scan_banner.bgcolor = ft.Colors.with_opacity(0.12, accent)
 
         # Refresh feed, present column and counters
@@ -299,20 +337,27 @@ class AccessView(ft.Column):
 
         cards = []
         for entry in ACCESS_LOG:
-            if selected_status != "TODOS" and entry["status"] != selected_status:
+            status = entry.get("status", "")
+            if selected_status == "ENTRADA" and status not in ("ENTRADA", "PERMITIDO"):
+                continue
+            elif selected_status == "SALIDA" and status != "SALIDA":
+                continue
+            elif selected_status == "DENEGADO" and status != "DENEGADO":
+                continue
+            elif selected_status not in ("TODOS", "ENTRADA", "SALIDA", "DENEGADO") and status != selected_status:
                 continue
 
-            haystack = f"{entry['cedula']} {entry['nombre']}".upper()
+            haystack = f"{entry.get('cedula', '')} {entry.get('nombre', '')}".upper()
             if query and query not in haystack:
                 continue
 
             cards.append(
                 AccessLogCard(
-                    nombre=entry["nombre"],
-                    plan=entry["plan"],
-                    hora=entry["hora"],
-                    status=entry["status"],
-                    cedula=entry["cedula"],
+                    nombre=entry.get("nombre", ""),
+                    plan=entry.get("plan", ""),
+                    hora=entry.get("hora", ""),
+                    status=status,
+                    cedula=entry.get("cedula", ""),
                 )
             )
 

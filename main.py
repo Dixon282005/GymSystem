@@ -4,6 +4,7 @@ import os
 import traceback
 
 import flet as ft
+import core.theme  # Apply cross-version Flet shims early
 from app import GymsisApp
 from core.db_store import bootstrap_database, hydrate_mock_data_from_db
 from core.env_loader import load_env_file
@@ -14,7 +15,7 @@ def main(page: ft.Page):
         bootstrap_database()
         hydrate_mock_data_from_db()
         app = GymsisApp(page)
-        app.show_login()
+        app.start()
     except Exception as exc:
         error_text = traceback.format_exc()
         print(error_text)
@@ -39,7 +40,14 @@ def main(page: ft.Page):
 
 if __name__ == "__main__":
     load_env_file()
-    run_mode = os.getenv("GYMSIS_RUN_MODE", "desktop").lower()
+    run_mode = os.getenv("GYMSIS_RUN_MODE", "auto").lower()
+
+    if run_mode in ("desktop", "auto"):
+        try:
+            import flet_desktop  # noqa: F401
+            run_mode = "desktop"
+        except ImportError:
+            run_mode = "web"
 
     if run_mode == "web":
         host = os.getenv("GYMSIS_HOST", "0.0.0.0")
@@ -52,9 +60,9 @@ if __name__ == "__main__":
         elif renderer_name == "auto":
             web_renderer = ft.WebRenderer.AUTO
         else:
-            # Flet 0.84 has no HTML renderer; AUTO is the widest-compatible fallback.
             web_renderer = ft.WebRenderer.AUTO
 
+        print(f"[Gymsis] Servidor web iniciado en http://localhost:{port}")
         ft.run(
             main,
             view=ft.AppView.WEB_BROWSER,
@@ -64,3 +72,4 @@ if __name__ == "__main__":
         )
     else:
         ft.run(main)
+

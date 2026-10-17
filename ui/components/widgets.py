@@ -65,7 +65,10 @@ class SidebarItem(ft.Container):
         self.content.controls[0].color = ACCENT_PRIMARY if active else TEXT_SECONDARY
         self.content.controls[1].color = ACCENT_PRIMARY if active else TEXT_SECONDARY
         self.content.controls[1].weight = "w600" if active else "w400"
-        self.update()
+        try:
+            self.update()
+        except Exception:
+            pass
 
 
 class LiveClock(ft.Container):
@@ -131,9 +134,22 @@ class AccessLogCard(ft.Container):
     """Card showing a single access event."""
 
     def __init__(self, nombre, plan, hora, status, cedula):
-        is_allowed = status == "PERMITIDO"
-        badge_color = ACCENT_SUCCESS if is_allowed else ACCENT_DANGER
-        badge_text = "PERMITIDO" if is_allowed else "ACCESO DENEGADO"
+        clean_status = (status or "").upper()
+        if clean_status == "SALIDA":
+            badge_color = "#0891b2"
+            badge_text = "SALIDA"
+            card_icon = ft.Icons.DIRECTIONS_WALK
+            icon_color = "#22d3ee"
+        elif clean_status in ("ENTRADA", "PERMITIDO"):
+            badge_color = ACCENT_SUCCESS
+            badge_text = "ENTRADA"
+            card_icon = ft.Icons.LOGIN
+            icon_color = ACCENT_SUCCESS
+        else:
+            badge_color = ACCENT_DANGER
+            badge_text = "DENEGADO"
+            card_icon = ft.Icons.BLOCK
+            icon_color = ACCENT_DANGER
 
         super().__init__(
             content=ft.Column(
@@ -142,9 +158,9 @@ class AccessLogCard(ft.Container):
                         controls=[
                             ft.Container(
                                 content=ft.Icon(
-                                    ft.Icons.ACCOUNT_CIRCLE,
-                                    size=36,
-                                    color=TEXT_MUTED,
+                                    card_icon,
+                                    size=24,
+                                    color=icon_color,
                                 ),
                                 width=44,
                                 height=44,
@@ -162,13 +178,16 @@ class AccessLogCard(ft.Container):
                             ft.Container(expand=True),
                             ft.Column(
                                 controls=[
-                                    ft.Text(
-                                        badge_text,
-                                        size=FONT_SIZE_XS,
-                                        color=TEXT_PRIMARY,
-                                        weight="w700",
+                                    ft.Container(
+                                        content=ft.Text(
+                                            badge_text,
+                                            size=10,
+                                            color=TEXT_PRIMARY,
+                                            weight="w700",
+                                        ),
                                         bgcolor=badge_color,
-                                        text_align=ft.TextAlign.CENTER,
+                                        padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                                        border_radius=4,
                                     ),
                                     ft.Text(hora, size=FONT_SIZE_XS, color=TEXT_MUTED, text_align=ft.TextAlign.CENTER),
                                 ],
@@ -189,10 +208,10 @@ class BarChartSim(ft.Container):
     """Simulated bar chart for weekly attendance."""
 
     def __init__(self, data):
-        max_val = max(d["count"] for d in data) if data else 1
+        max_val = max([d.get("count", 0) for d in data], default=1) or 1
         bars = []
         for d in data:
-            height = max(20, int((d["count"] / max_val) * 160))
+            height = max(20, int((d.get("count", 0) / max_val) * 160))
             bars.append(
                 ft.Column(
                     controls=[
@@ -230,40 +249,71 @@ class BarChartSim(ft.Container):
 
 
 class POSProductRow(ft.Container):
-    """Single row for POS product selection."""
+    """Single row for POS product selection and inventory CRUD."""
 
-    def __init__(self, producto, on_add=None):
+    def __init__(self, producto, on_add=None, on_edit=None, on_delete=None):
         self.producto = producto
         self.qty = 1
         self._on_add = on_add
+        self._on_edit = on_edit
+        self._on_delete = on_delete
 
-        self.qty_text = ft.Text("1", size=FONT_SIZE_SM, color=TEXT_PRIMARY, weight="w600")
+        stock_count = int(producto.get("stock", 0))
+        stock_color = ACCENT_DANGER if stock_count <= 0 else (TEXT_MUTED if stock_count > 5 else "#f59e0b")
+
+        action_controls = []
+        if on_edit:
+            action_controls.append(
+                ft.IconButton(
+                    icon=ft.Icons.EDIT_OUTLINED,
+                    icon_size=18,
+                    icon_color=TEXT_SECONDARY,
+                    tooltip="Editar producto",
+                    on_click=lambda e: self._on_edit(self.producto),
+                )
+            )
+        if on_delete:
+            action_controls.append(
+                ft.IconButton(
+                    icon=ft.Icons.DELETE_OUTLINE,
+                    icon_size=18,
+                    icon_color=ACCENT_DANGER,
+                    tooltip="Eliminar producto",
+                    on_click=lambda e: self._on_delete(self.producto),
+                )
+            )
+        if on_add:
+            action_controls.append(
+                ft.IconButton(
+                    icon=ft.Icons.ADD_CIRCLE,
+                    icon_size=22,
+                    icon_color=ACCENT_PRIMARY if stock_count > 0 else TEXT_MUTED,
+                    disabled=stock_count <= 0,
+                    tooltip="Agregar al carrito" if stock_count > 0 else "Sin stock",
+                    on_click=self._handle_add,
+                )
+            )
 
         super().__init__(
             content=ft.Row(
                 controls=[
                     ft.Column(
                         controls=[
-                            ft.Text(producto["nombre"], size=FONT_SIZE_SM, color=TEXT_PRIMARY, weight="w500"),
-                            ft.Text(f"Stock: {producto['stock']}", size=FONT_SIZE_XS, color=TEXT_MUTED),
+                            ft.Text(producto["nombre"], size=FONT_SIZE_SM, color=TEXT_PRIMARY, weight="w600"),
+                            ft.Text(f"Stock: {stock_count} • {producto.get('categoria', 'General')}", size=FONT_SIZE_XS, color=stock_color),
                         ],
                         spacing=2,
+                        expand=True,
                     ),
-                    ft.Container(expand=True),
-                    ft.Text(f"${producto['precio']:.2f}", size=FONT_SIZE_SM, color=ACCENT_PRIMARY, weight="w600"),
-                    ft.IconButton(
-                        ft.Icons.ADD_CIRCLE_OUTLINE,
-                        icon_size=22,
-                        icon_color=ACCENT_PRIMARY,
-                        on_click=self._handle_add,
-                        tooltip="Agregar al carrito",
-                    ),
+                    ft.Text(f"${producto['precio']:.2f}", size=FONT_SIZE_SM, color=ACCENT_PRIMARY, weight="w700"),
+                    ft.Row(controls=action_controls, spacing=0),
                 ],
                 alignment=ft.MainAxisAlignment.START,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
             **card_style(padding=PADDING_MD),
         )
 
     def _handle_add(self, e):
-        if self._on_add:
+        if self._on_add and self.producto.get("stock", 0) > 0:
             self._on_add(self.producto, self.qty)

@@ -32,3 +32,7 @@ Thumbs.db
 *.tmp
 *.bak
 .cache/
+data/
+backups/
+*.db
+*.sqlite3
