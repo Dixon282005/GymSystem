@@ -58,7 +58,7 @@ def get_dashboard_metrics():
 
 
 def can_member_access(member):
-    """Return (allowed, reason) following access rules."""
+    """Return (allowed, reason) following access rules with dynamic date checking."""
     if not member:
         return False, "Miembro no encontrado"
 
@@ -68,11 +68,25 @@ def can_member_access(member):
     if estado == "Moroso":
         return False, "Membresia morosa"
 
+    # Dynamic expiration check
+    vencimiento_str = member.get("vencimiento")
+    if vencimiento_str:
+        try:
+            from datetime import timedelta
+            venc_date = datetime.strptime(vencimiento_str, "%Y-%m-%d").date()
+            today = datetime.now().date()
+            grace_days = int(APP_SETTINGS.get("moroso_grace_days", 0))
+            if today > (venc_date + timedelta(days=grace_days)):
+                member["estado"] = "Moroso"
+                return False, "Membresia vencida"
+        except Exception:
+            pass
+
     return True, "Acceso permitido"
 
 
 def register_access_attempt(cedula, member, allowed):
-    """Persist a simulated access event in ACCESS_LOG and toggle training flag."""
+    """Persist an access event in ACCESS_LOG and toggle training flag."""
     now = datetime.now().strftime("%H:%M")
     status = "PERMITIDO" if allowed else "DENEGADO"
 
@@ -89,6 +103,35 @@ def register_access_attempt(cedula, member, allowed):
     ACCESS_LOG.insert(0, event)
     save_access_event(event)
     return event
+
+
+def process_nfc_scan(nfc_uid: str):
+    """Process an NFC card tap: lookup, validate, sound alerts and record attempt."""
+    from core.mock_data import find_member_by_nfc_id, find_member_by_cedula
+    from core.audio_service import audio
+    from core.nfc_service import nfc_reader
+
+    # 1. Lookup member by NFC UID (or fallback to cedula)
+    member = find_member_by_nfc_id(nfc_uid)
+    if not member:
+        member = find_member_by_cedula(nfc_uid)
+
+    allowed, reason = can_member_access(member)
+    event = register_access_attempt(member["cedula"] if member else nfc_uid, member, allowed)
+
+    if allowed:
+        nfc_reader.beep_success()
+        audio.announce_access_granted(member["nombre"], member.get("plan", ""))
+    else:
+        nfc_reader.beep_denied()
+        audio.announce_access_denied(member["nombre"] if member else "", reason)
+
+    return {
+        "event": event,
+        "member": member,
+        "allowed": allowed,
+        "reason": reason,
+    }
 
 
 def build_access_snapshot():

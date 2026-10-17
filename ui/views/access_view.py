@@ -1,19 +1,23 @@
-"""Live Access Feed view — real-time NFC access log for reception."""
+"""Live Access Feed view — real-time NFC access log with voice announcements and ACR122U reader."""
+
+from __future__ import annotations
 
 import flet as ft
 from core.theme import (
-    BG_INPUT, BORDER, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED,
+    BG_CARD, BG_INPUT, BORDER, TEXT_PRIMARY, TEXT_SECONDARY, TEXT_MUTED,
     ACCENT_PRIMARY, ACCENT_SUCCESS, ACCENT_DANGER,
-    FONT_SIZE_MD,
+    RADIUS_SM, RADIUS_MD, PADDING_MD,
+    FONT_SIZE_SM, FONT_SIZE_MD, FONT_SIZE_LG,
     card_style, heading_text, label_text,
 )
-from core.mock_data import ACCESS_LOG, APP_SETTINGS, find_member_by_cedula
-from core.business import can_member_access, register_access_attempt, build_access_snapshot
+from core.mock_data import ACCESS_LOG, APP_SETTINGS
+from core.business import process_nfc_scan, build_access_snapshot
+from core.nfc_service import nfc_reader
 from ui.components.widgets import AccessLogCard
 
 
 class AccessView(ft.Column):
-    """Live access feed with NFC simulation."""
+    """Live access feed with native ACR122U hardware listener and voice announcements."""
 
     def __init__(self):
         snapshot = build_access_snapshot()
@@ -22,9 +26,55 @@ class AccessView(ft.Column):
         self.denied_counter = ft.Text(str(snapshot["denied_today"]), size=22, color=ACCENT_DANGER, weight="w700")
         self.events_counter = ft.Text(str(snapshot["total_events"]), size=22, color=ACCENT_PRIMARY, weight="w700")
 
+        # Hardware status indicator badge
+        self.status_icon = ft.Icon(
+            ft.Icons.NFC,
+            size=18,
+            color=ACCENT_SUCCESS if nfc_reader.is_connected else ACCENT_DANGER,
+        )
+        self.status_label = ft.Text(
+            "ACR122U Conectado" if nfc_reader.is_connected else "Lector Desconectado",
+            size=12,
+            color=ACCENT_SUCCESS if nfc_reader.is_connected else ACCENT_DANGER,
+            weight="w600",
+        )
+        self.reader_badge = ft.Container(
+            content=ft.Row(
+                controls=[self.status_icon, self.status_label],
+                spacing=6,
+                alignment=ft.MainAxisAlignment.CENTER,
+            ),
+            padding=ft.padding.symmetric(horizontal=12, vertical=6),
+            bgcolor=ft.Colors.with_opacity(0.12, ACCENT_SUCCESS if nfc_reader.is_connected else ACCENT_DANGER),
+            border=ft.border.all(1, ft.Colors.with_opacity(0.3, ACCENT_SUCCESS if nfc_reader.is_connected else ACCENT_DANGER)),
+            border_radius=16,
+        )
+
+        # Hero Banner for the latest scan (Visual feedback in reception)
+        self.latest_scan_banner = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.CONTACTLESS, size=32, color=TEXT_MUTED),
+                    ft.Column(
+                        controls=[
+                            ft.Text("Esperando aproximación de tarjeta o llavero NFC...", size=14, color=TEXT_SECONDARY, weight="w500"),
+                            ft.Text("Pase el llavero por el lector ACS ACR122U para registrar entrada", size=11, color=TEXT_MUTED),
+                        ],
+                        spacing=2,
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.START,
+            ),
+            padding=14,
+            bgcolor=BG_CARD,
+            border=ft.border.all(1, BORDER),
+            border_radius=RADIUS_MD,
+            margin=ft.margin.only(bottom=8),
+        )
+
         self.log_container = ft.Column(
             controls=[],
-            spacing=12,
+            spacing=10,
             scroll=ft.ScrollMode.AUTO,
         )
 
@@ -39,38 +89,32 @@ class AccessView(ft.Column):
                 ft.dropdown.Option("PERMITIDO"),
                 ft.dropdown.Option("DENEGADO"),
             ],
-            width=150,
+            width=140,
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
+            on_change=self._refresh_log_cards,
         )
         self.filter_query = ft.TextField(
-            hint_text="Filtrar por cedula o nombre...",
-            width=260,
-            height=42,
+            hint_text="Filtrar socio...",
+            width=200,
+            height=40,
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
             on_submit=self._refresh_log_cards,
         )
-        self.apply_filter_btn = ft.IconButton(
-            icon=ft.Icons.FILTER_ALT,
-            icon_color=ACCENT_PRIMARY,
-            tooltip="Aplicar filtros",
-            on_click=self._refresh_log_cards,
-        )
 
         self.sim_input = ft.TextField(
-            hint_text="Simular escaneo NFC (ingresa cedula)...",
+            hint_text="Escaneo manual (Cédula o UID)...",
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
             border_radius=8,
-            text_size=14,
-            height=42,
-            width=300,
-            on_submit=self._simulate_scan,
-            disabled=not APP_SETTINGS.get("enable_nfc_simulation", True),
+            text_size=13,
+            height=40,
+            width=240,
+            on_submit=self._handle_manual_scan,
         )
 
         self._refresh_log_cards()
@@ -79,35 +123,42 @@ class AccessView(ft.Column):
             controls=[
                 ft.Row(
                     controls=[
-                        heading_text("Live Access Feed"),
+                        heading_text("Control de Acceso en Vivo"),
                         ft.Container(expand=True),
+                        self.reader_badge,
                         self.filter_status,
                         self.filter_query,
-                        self.apply_filter_btn,
-                        label_text("Simulacion NFC", color=TEXT_MUTED),
                         self.sim_input,
                     ],
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                ft.Container(height=8),
+                self.latest_scan_banner,
                 ft.Row(
                     controls=[
-                        self._counter_card("Permitidos", self.allowed_counter, ACCENT_SUCCESS),
-                        self._counter_card("Denegados", self.denied_counter, ACCENT_DANGER),
-                        self._counter_card("Eventos", self.events_counter, ACCENT_PRIMARY),
+                        self._counter_card("Permitidos Hoy", self.allowed_counter, ACCENT_SUCCESS),
+                        self._counter_card("Denegados Hoy", self.denied_counter, ACCENT_DANGER),
+                        self._counter_card("Total Eventos", self.events_counter, ACCENT_PRIMARY),
                     ],
                     spacing=12,
                 ),
-                ft.Container(height=8),
+                ft.Container(height=4),
                 ft.Row(
                     controls=[
                         ft.Container(
                             content=ft.Column(
                                 controls=[
-                                    heading_text("Registro de Accesos", size=FONT_SIZE_MD),
-                                    ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=8, bottom=12)),
+                                    ft.Row(
+                                        controls=[
+                                            heading_text("Registro de Accesos", size=FONT_SIZE_MD),
+                                            ft.Container(expand=True),
+                                            ft.Text("Últimos movimientos", size=11, color=TEXT_MUTED),
+                                        ],
+                                    ),
+                                    ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=4, bottom=8)),
                                     self.log_container,
                                 ],
-                                spacing=8,
+                                spacing=4,
                             ),
                             expand=2,
                             **card_style(),
@@ -115,11 +166,17 @@ class AccessView(ft.Column):
                         ft.Container(
                             content=ft.Column(
                                 controls=[
-                                    heading_text("En el Gimnasio", size=FONT_SIZE_MD),
-                                    ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=8, bottom=12)),
+                                    ft.Row(
+                                        controls=[
+                                            heading_text("En el Gimnasio", size=FONT_SIZE_MD),
+                                            ft.Container(expand=True),
+                                            ft.Icon(ft.Icons.FITNESS_CENTER, size=16, color=ACCENT_PRIMARY),
+                                        ],
+                                    ),
+                                    ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=4, bottom=8)),
                                     self.present_column,
                                 ],
-                                spacing=8,
+                                spacing=4,
                             ),
                             expand=1,
                             **card_style(),
@@ -132,6 +189,109 @@ class AccessView(ft.Column):
             spacing=8,
             expand=True,
         )
+
+        # Hook NFC service callbacks
+        nfc_reader.access_callback = self._on_nfc_scan
+        nfc_reader.status_callback = self._on_nfc_status_change
+
+    def _on_nfc_status_change(self, connected: bool, message: str):
+        color = ACCENT_SUCCESS if connected else ACCENT_DANGER
+        self.status_icon.color = color
+        self.status_label.value = "ACR122U Conectado" if connected else "Lector Desconectado"
+        self.status_label.color = color
+        self.reader_badge.bgcolor = ft.Colors.with_opacity(0.12, color)
+        self.reader_badge.border = ft.border.all(1, ft.Colors.with_opacity(0.3, color))
+        if hasattr(self, "page") and self.page:
+            try:
+                self.reader_badge.update()
+            except Exception:
+                pass
+
+    def _on_nfc_scan(self, uid: str):
+        """Dispatched from the background NFC worker thread when a tag is touched."""
+        result = process_nfc_scan(uid)
+        self._update_ui_with_scan_result(result, uid)
+
+    def _handle_manual_scan(self, e):
+        raw_val = (self.sim_input.value or "").strip()
+        if not raw_val:
+            return
+        self.sim_input.value = ""
+        try:
+            self.sim_input.update()
+        except Exception:
+            pass
+
+        result = process_nfc_scan(raw_val)
+        self._update_ui_with_scan_result(result, raw_val)
+
+    def _update_ui_with_scan_result(self, result: dict, raw_input: str):
+        allowed = result["allowed"]
+        member = result["member"]
+        reason = result["reason"]
+
+        accent = ACCENT_SUCCESS if allowed else ACCENT_DANGER
+        status_text = "ACCESO PERMITIDO" if allowed else f"DENEGADO: {reason.upper()}"
+        nombre = member["nombre"] if member else "Tarjeta No Registrada"
+        plan = member.get("plan", "-") if member else "-"
+        cedula = member.get("cedula", raw_input) if member else raw_input
+
+        # Update Hero Banner
+        self.latest_scan_banner.content = ft.Row(
+            controls=[
+                ft.Container(
+                    content=ft.Icon(
+                        ft.Icons.CHECK_CIRCLE if allowed else ft.Icons.CANCEL,
+                        color=ft.Colors.WHITE,
+                        size=28,
+                    ),
+                    bgcolor=accent,
+                    width=48,
+                    height=48,
+                    border_radius=24,
+                    alignment=ft.Alignment(0, 0),
+                ),
+                ft.Column(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Text(nombre, size=16, color=TEXT_PRIMARY, weight="w700"),
+                                ft.Container(
+                                    content=ft.Text(status_text, size=11, color=ft.Colors.WHITE, weight="w700"),
+                                    bgcolor=accent,
+                                    padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                                    border_radius=RADIUS_SM,
+                                ),
+                            ],
+                            spacing=10,
+                        ),
+                        ft.Text(f"Plan: {plan} • Cédula: {cedula} • UID: {raw_input}", size=12, color=TEXT_SECONDARY),
+                    ],
+                    spacing=3,
+                    expand=True,
+                ),
+            ],
+            spacing=14,
+            alignment=ft.MainAxisAlignment.START,
+        )
+        self.latest_scan_banner.border = ft.border.all(1.5, accent)
+        self.latest_scan_banner.bgcolor = ft.Colors.with_opacity(0.12, accent)
+
+        # Refresh feed, present column and counters
+        self._refresh_present_list()
+        self._refresh_log_cards()
+        self._refresh_counters()
+
+        if hasattr(self, "page") and self.page:
+            try:
+                self.latest_scan_banner.update()
+                self.present_column.update()
+                self.log_container.update()
+                self.allowed_counter.update()
+                self.denied_counter.update()
+                self.events_counter.update()
+            except Exception:
+                pass
 
     def _build_log_cards(self):
         selected_status = self.filter_status.value or "TODOS"
@@ -159,30 +319,39 @@ class AccessView(ft.Column):
         if not cards:
             cards.append(
                 ft.Container(
-                    content=label_text("Sin resultados para el filtro", color=TEXT_MUTED),
+                    content=label_text("Sin movimientos registrados", color=TEXT_MUTED),
                     **card_style(),
                 )
             )
-
         return cards
 
     def _refresh_log_cards(self, e=None):
         self.log_container.controls = self._build_log_cards()
-        if e is not None:
-            self.log_container.update()
+        if e is not None and hasattr(self, "page") and self.page:
+            try:
+                self.log_container.update()
+            except Exception:
+                pass
 
     def _build_present_list(self):
         present = build_access_snapshot()["present"]
         items = []
         for m in present:
             items.append(
-                ft.Row(
-                    controls=[
-                        ft.Icon(ft.Icons.CHECK_CIRCLE, size=16, color=ACCENT_SUCCESS),
-                        ft.Text(m["nombre"], size=13, color=TEXT_PRIMARY),
-                        ft.Container(expand=True),
-                        ft.Text(m["plan"], size=12, color=TEXT_SECONDARY),
-                    ],
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Icon(ft.Icons.PERSON, size=16, color=ACCENT_SUCCESS),
+                            ft.Text(m["nombre"], size=13, color=TEXT_PRIMARY, weight="w500", expand=True),
+                            ft.Container(
+                                content=ft.Text(m["plan"], size=10, color=TEXT_SECONDARY),
+                                bgcolor=BG_INPUT,
+                                padding=ft.padding.symmetric(horizontal=6, vertical=2),
+                                border_radius=4,
+                            ),
+                        ],
+                    ),
+                    padding=ft.padding.symmetric(vertical=4),
                 )
             )
         if not items:
@@ -197,34 +366,16 @@ class AccessView(ft.Column):
         self.allowed_counter.value = str(snapshot["allowed_today"])
         self.denied_counter.value = str(snapshot["denied_today"])
         self.events_counter.value = str(snapshot["total_events"])
-        self.allowed_counter.update()
-        self.denied_counter.update()
-        self.events_counter.update()
 
     def _counter_card(self, label, value_control, color):
         return ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Text(label, size=12, color=TEXT_MUTED),
+                    ft.Text(label, size=11, color=TEXT_MUTED, weight="w500"),
                     value_control,
                 ],
-                spacing=4,
+                spacing=2,
             ),
             expand=True,
             **card_style(),
         )
-
-    def _simulate_scan(self, e):
-        cedula = self.sim_input.value.strip()
-        if not cedula:
-            return
-
-        member = find_member_by_cedula(cedula)
-        allowed, _reason = can_member_access(member)
-        register_access_attempt(cedula, member, allowed)
-        self.sim_input.value = ""
-        self._refresh_present_list()
-        self._refresh_log_cards()
-        self.sim_input.update()
-        self.present_column.update()
-        self._refresh_counters()

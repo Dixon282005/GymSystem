@@ -213,3 +213,31 @@ def register_member(cedula, nombre, plan, nfc_id):
     MEMBER_BY_CEDULA[normalized] = new_member
     save_member(new_member)
     return new_member
+
+
+def normalize_nfc_id(nfc_id: str) -> str:
+    """Normalize NFC UID: remove colons/dashes and uppercase."""
+    return (nfc_id or "").replace(":", "").replace("-", "").strip().upper()
+
+
+def find_member_by_nfc_id(nfc_id: str):
+    """Find member by NFC tag UID or card ID."""
+    clean = normalize_nfc_id(nfc_id)
+    if not clean:
+        return None
+    for member in MEMBERS:
+        tag = normalize_nfc_id(member.get("nfc_id", ""))
+        if tag and tag == clean:
+            return member
+    return None
+
+
+def update_member_nfc(cedula: str, nfc_id: str) -> bool:
+    """Associate an NFC tag UID with an existing member."""
+    member = find_member_by_cedula(cedula)
+    if not member:
+        return False
+    clean = normalize_nfc_id(nfc_id)
+    member["nfc_id"] = clean
+    save_member(member)
+    return True

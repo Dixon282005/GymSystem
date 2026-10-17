@@ -6,6 +6,8 @@ from core.theme import (
     ACCENT_PRIMARY, FONT_SIZE_LG,
 )
 from core.mock_data import find_member_by_cedula, search_members_by_name_or_cedula
+from core.nfc_service import nfc_reader
+from core.audio_service import audio
 from ui.components.widgets import SidebarItem, LiveClock, GlobalSearch
 from ui.views.login_view import LoginView
 from ui.views.dashboard_view import DashboardView
@@ -26,6 +28,7 @@ class GymsisApp:
         self.sidebar_container = ft.Container(width=240)
 
         self._configure_page()
+        self._setup_nfc()
 
     def _configure_page(self):
         self.page.title = "Gymsis"
@@ -155,6 +158,26 @@ class GymsisApp:
             self._navigate_to(index)
         return handler
 
+    def _setup_nfc(self):
+        """Initialize the background NFC reader thread and global handler."""
+        nfc_reader.start()
+        nfc_reader.access_callback = self._handle_global_nfc_scan
+
+    def _handle_global_nfc_scan(self, uid: str):
+        """Handle NFC card scan globally from any view in the app."""
+        if isinstance(self.view_container.content, AccessView):
+            self.view_container.content._on_nfc_scan(uid)
+            return
+
+        from core.business import process_nfc_scan
+        result = process_nfc_scan(uid)
+        allowed = result["allowed"]
+        member = result["member"]
+        name = member["nombre"] if member else "Tarjeta No Registrada"
+        color = "#0f766e" if allowed else "#7f1d1d"
+        status_msg = f"Acceso {'Permitido' if allowed else 'Denegado'}: {name}"
+        self._show_message(status_msg, color=color)
+
     def _navigate_to(self, index):
         self.current_view_index = index
 
@@ -170,7 +193,14 @@ class GymsisApp:
         ]
 
         view_class = views[index]
-        self.view_container.content = view_class()
+        new_view = view_class()
+        self.view_container.content = new_view
+
+        if isinstance(new_view, AccessView):
+            nfc_reader.access_callback = new_view._on_nfc_scan
+            nfc_reader.status_callback = new_view._on_nfc_status_change
+        else:
+            nfc_reader.access_callback = self._handle_global_nfc_scan
 
         if hasattr(self.view_container, "update"):
             self.view_container.update()
@@ -213,6 +243,7 @@ class GymsisApp:
         if raw_value.upper() in demo_tokens or raw_value == "__DEMO__":
             self.page.clean()
             self._build_layout()
+            audio.speak("Sistema Gymsis iniciado en modo demostración")
             self._show_message("Modo demo activado", color="#0f766e")
             return
 
@@ -221,5 +252,9 @@ class GymsisApp:
         if member:
             self.page.clean()
             self._build_layout()
+            first = member["nombre"].split()[0]
+            audio.speak(f"Bienvenido al sistema, {first}")
+            self._show_message(f"Sesión iniciada: {member['nombre']}", color="#0f766e")
         else:
+            audio.speak("Cédula no registrada")
             self._show_message("Cedula no registrada o inactiva", color="#7f1d1d")
