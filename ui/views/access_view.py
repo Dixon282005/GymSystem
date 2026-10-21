@@ -76,9 +76,15 @@ class AccessView(ft.Column):
             controls=[],
             spacing=10,
             scroll=ft.ScrollMode.AUTO,
+            expand=True,
         )
 
-        self.present_column = ft.Column(controls=[], spacing=8)
+        self.present_column = ft.Column(
+            controls=[],
+            spacing=8,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        )
         self._refresh_present_list()
 
         self.filter_status = ft.Dropdown(
@@ -157,9 +163,10 @@ class AccessView(ft.Column):
                                         ],
                                     ),
                                     ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=4, bottom=8)),
-                                    self.log_container,
+                                    ft.Container(content=self.log_container, expand=True),
                                 ],
                                 spacing=4,
+                                expand=True,
                             ),
                             expand=2,
                             **card_style(),
@@ -175,9 +182,10 @@ class AccessView(ft.Column):
                                         ],
                                     ),
                                     ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=4, bottom=8)),
-                                    self.present_column,
+                                    ft.Container(content=self.present_column, expand=True),
                                 ],
                                 spacing=4,
+                                expand=True,
                             ),
                             expand=1,
                             **card_style(),
@@ -236,7 +244,7 @@ class AccessView(ft.Column):
 
     def _on_nfc_scan(self, uid: str):
         """Dispatched from the background NFC worker thread when a tag is touched."""
-        process_nfc_scan(uid)
+        process_nfc_scan(uid, min_interval=3.0)
 
     def _handle_manual_scan(self, e):
         raw_val = (self.sim_input.value or "").strip()
@@ -273,6 +281,23 @@ class AccessView(ft.Column):
         nombre = member["nombre"] if member else "Tarjeta No Registrada"
         plan = member.get("plan", "-") if member else "-"
         cedula = member.get("cedula", raw_input) if member else raw_input
+        urgency = (result.get("urgency") or {}) if member else {}
+        urg_label = urgency.get("label", "")
+        urg_hex = urgency.get("hex", "#10B981")
+        venc = member.get("vencimiento", "") if member else ""
+
+        banner_subrow_controls = [
+            ft.Text(f"Plan: {plan} • Cédula: {cedula} • UID: {raw_input}", size=12, color=TEXT_SECONDARY),
+        ]
+        if member and urg_label:
+            banner_subrow_controls.append(
+                ft.Container(
+                    content=ft.Text(urg_label.upper(), size=10, color=ft.Colors.WHITE, weight="w700"),
+                    bgcolor=urg_hex,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                    border_radius=RADIUS_SM,
+                )
+            )
 
         # Update Hero Banner
         self.latest_scan_banner.content = ft.Row(
@@ -303,7 +328,11 @@ class AccessView(ft.Column):
                             ],
                             spacing=10,
                         ),
-                        ft.Text(f"Plan: {plan} • Cédula: {cedula} • UID: {raw_input}", size=12, color=TEXT_SECONDARY),
+                        ft.Row(
+                            controls=banner_subrow_controls,
+                            spacing=10,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
                     ],
                     spacing=3,
                     expand=True,

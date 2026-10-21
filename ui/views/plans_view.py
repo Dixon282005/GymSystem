@@ -57,6 +57,7 @@ class PlansView(ft.Column):
             label="Precio en USD ($)",
             hint_text="Ej: 30.00",
             keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.InputFilter(allow=True, regex_string=r"^\d*\.?\d{0,2}$", replacement_string=""),
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
@@ -70,6 +71,7 @@ class PlansView(ft.Column):
             hint_text="Ej: 30",
             value="30",
             keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.NumbersOnlyInputFilter(),
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
@@ -398,8 +400,11 @@ class PlansView(ft.Column):
         self.modal_title.value = "Nuevo Plan de Membresía"
         self.plan_name_field.read_only = False
         self.plan_name_field.value = ""
+        self.plan_name_field.error_text = None
         self.plan_price_field.value = "30.00"
+        self.plan_price_field.error_text = None
         self.plan_days_field.value = "30"
+        self.plan_days_field.error_text = None
         self.plan_desc_field.value = ""
         self._on_modal_price_change(None)
         self._open_modal(self.plan_dialog)
@@ -408,34 +413,50 @@ class PlansView(ft.Column):
         self.modal_title.value = f"Editar Plan: {plan['nombre']}"
         self.plan_name_field.value = plan.get("nombre", "")
         self.plan_name_field.read_only = True
+        self.plan_name_field.error_text = None
         self.plan_price_field.value = f"{float(plan.get('precio', 0.0)):.2f}"
+        self.plan_price_field.error_text = None
         self.plan_days_field.value = str(plan.get("dias", 30))
+        self.plan_days_field.error_text = None
         self.plan_desc_field.value = plan.get("descripcion", "")
         self._on_modal_price_change(None)
         self._open_modal(self.plan_dialog)
 
     def _save_plan_action(self, e):
+        self.plan_name_field.error_text = None
+        self.plan_price_field.error_text = None
+        self.plan_days_field.error_text = None
+
+        has_error = False
         nombre = (self.plan_name_field.value or "").strip()
         if not nombre or len(nombre) < 2:
-            self._show_notification("El nombre del plan debe tener al menos 2 letras", ACCENT_DANGER)
-            return
+            self.plan_name_field.error_text = "El nombre del plan debe tener al menos 2 letras"
+            has_error = True
 
+        raw_price = (self.plan_price_field.value or "").strip()
         try:
-            precio = float(self.plan_price_field.value or 0.0)
+            precio = float(raw_price or 0.0)
             if precio < 0:
-                self._show_notification("El precio no puede ser negativo", ACCENT_DANGER)
-                return
+                self.plan_price_field.error_text = "El precio no puede ser negativo"
+                has_error = True
         except ValueError:
-            self._show_notification("Precio inválido (ingrese un número como 30.00)", ACCENT_DANGER)
-            return
+            self.plan_price_field.error_text = "Precio numérico inválido (ej: 30.00)"
+            has_error = True
 
+        raw_days = (self.plan_days_field.value or "").strip()
         try:
-            dias = int(self.plan_days_field.value or 30)
+            dias = int(raw_days or 30)
             if dias <= 0:
-                self._show_notification("La duración debe ser al menos 1 día", ACCENT_DANGER)
-                return
+                self.plan_days_field.error_text = "La duración debe ser al menos 1 día"
+                has_error = True
         except ValueError:
-            self._show_notification("La duración debe ser un número entero de días (ej: 30)", ACCENT_DANGER)
+            self.plan_days_field.error_text = "La duración debe ser un número entero (ej: 30)"
+            has_error = True
+
+        if has_error:
+            self.plan_name_field.update()
+            self.plan_price_field.update()
+            self.plan_days_field.update()
             return
 
         descripcion = (self.plan_desc_field.value or "").strip()

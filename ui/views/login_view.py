@@ -30,9 +30,23 @@ class LoginView(ft.Container):
         self._on_login = on_login
         self._on_back_to_kiosk = on_back_to_kiosk
 
-        self.token_input = ft.TextField(
-            label="Token o Contraseña de Administrador",
-            hint_text="Escribe: ADMIN o tu token",
+        self.username_input = ft.TextField(
+            label="Usuario",
+            value="admin",
+            hint_text="admin / recepcion / gerente",
+            prefix_icon=ft.Icons.PERSON_OUTLINE,
+            bgcolor=BG_INPUT,
+            color=TEXT_PRIMARY,
+            border_color=BORDER,
+            border_radius=RADIUS_SM,
+            text_size=FONT_SIZE_MD,
+            width=360,
+            on_submit=lambda e: self.password_input.focus(),
+        )
+
+        self.password_input = ft.TextField(
+            label="Contraseña de Administrador",
+            hint_text="Ingresa tu clave de acceso",
             password=True,
             can_reveal_password=True,
             prefix_icon=ft.Icons.LOCK_OUTLINE,
@@ -44,6 +58,8 @@ class LoginView(ft.Container):
             width=360,
             on_submit=self._handle_login,
         )
+        # Backward-compatibility alias
+        self.token_input = self.password_input
 
         self.status_text = ft.Text("", size=FONT_SIZE_SM, color=ACCENT_DANGER, visible=False)
 
@@ -65,8 +81,10 @@ class LoginView(ft.Container):
                         color=TEXT_SECONDARY,
                         text_align=ft.TextAlign.CENTER,
                     ),
-                    ft.Container(height=20),
-                    self.token_input,
+                    ft.Container(height=16),
+                    self.username_input,
+                    ft.Container(height=8),
+                    self.password_input,
                     ft.Container(height=6),
                     self.status_text,
                     ft.Container(height=12),
@@ -120,9 +138,10 @@ class LoginView(ft.Container):
         )
 
     def _handle_login(self, e):
-        token = self.token_input.value.strip()
-        if not token:
-            self.status_text.value = "Por favor ingresa tu token de acceso"
+        username = (self.username_input.value or "admin").strip()
+        password = (self.password_input.value or "").strip()
+        if not password:
+            self.status_text.value = "Por favor ingresa tu contraseña de acceso"
             self.status_text.visible = True
             try:
                 self.status_text.update()
@@ -131,7 +150,7 @@ class LoginView(ft.Container):
             return
 
         if self._on_login:
-            self._on_login(token)
+            self._on_login(username, password)
 
     def _handle_back(self, e):
         if self._on_back_to_kiosk:

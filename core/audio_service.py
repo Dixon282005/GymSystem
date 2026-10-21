@@ -98,11 +98,11 @@ class AudioService:
             except Exception:
                 pass
 
-        print(f"\a[AUDIO]: {cleaned}")
+        print(f"[AUDIO]: {cleaned}")
 
     def _play_neural_tts(self, text: str) -> bool:
         """Generate/Fetch cached MP3 and play via system audio player."""
-        if not self._players:
+        if not self._players and os.name != "nt":
             return False
 
         # Generate a stable hash key for the text + voice combo
@@ -135,7 +135,41 @@ class AudioService:
                 pass
             return False
 
-        # Try players in order until one plays successfully
+        # On Windows, play via native winmm.dll or PowerShell MediaPlayer
+        if os.name == "nt":
+            try:
+                import ctypes
+                winmm = ctypes.windll.winmm
+                alias = f"gymsis_mp3_{threading.get_ident()}"
+                winmm.mciSendStringW(f'close {alias}', None, 0, None)
+                ret = winmm.mciSendStringW(f'open "{cache_file}" type mpegvideo alias {alias}', None, 0, None)
+                if ret == 0:
+                    winmm.mciSendStringW(f'play {alias} wait', None, 0, None)
+                    winmm.mciSendStringW(f'close {alias}', None, 0, None)
+                    return True
+            except Exception:
+                pass
+
+            try:
+                ps_cmd = (
+                    f"Add-Type -AssemblyName presentationCore; "
+                    f"$p = New-Object System.Windows.Media.MediaPlayer; "
+                    f"$p.Open([System.Uri]'{cache_file}'); $p.Play(); "
+                    f"Start-Sleep -Seconds 4; $p.Close()"
+                )
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=6,
+                )
+                if res.returncode == 0:
+                    return True
+            except Exception:
+                pass
+
+        # Try Linux/Unix players in order until one plays successfully
         for player in self._players:
             try:
                 if "pw-play" in player:

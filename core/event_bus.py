@@ -37,15 +37,27 @@ class EventBus:
                 self._subscribers[event_type].remove(callback)
 
     def publish(self, event_type: str, data: Any = None) -> None:
-        """Notify all subscribers of an event."""
+        """Notify all subscribers of an event, automatically pruning dead callbacks."""
         with self._lock:
             callbacks = list(self._subscribers.get(event_type, []))
 
+        dead_callbacks = []
         for cb in callbacks:
             try:
                 cb(data)
             except Exception as e:
-                logger.error(f"[EventBus] Error executing listener for '{event_type}': {e}")
+                err_msg = str(e).lower()
+                # If subscriber belonged to a destroyed/closed Flet page, prune it to prevent memory leaks
+                if "not added to" in err_msg or "destroyed" in err_msg or "closed" in err_msg:
+                    dead_callbacks.append(cb)
+                else:
+                    logger.debug(f"[EventBus] Listener for '{event_type}' notice: {e}")
+
+        if dead_callbacks:
+            with self._lock:
+                for dead_cb in dead_callbacks:
+                    if event_type in self._subscribers and dead_cb in self._subscribers[event_type]:
+                        self._subscribers[event_type].remove(dead_cb)
 
 
 # Global singleton instance

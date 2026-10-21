@@ -27,11 +27,9 @@ from core.theme import (
     label_text,
 )
 from core.mock_data import (
-    POS_PRODUCTS,
     DAILY_SALES,
-    add_or_update_product,
-    remove_product,
 )
+from core.repositories import POSProductRepository
 from core.bcv_service import bcv_service
 from core.business import compute_sales_summary, register_sale_rows
 from core.event_bus import event_bus
@@ -47,6 +45,7 @@ class POSView(ft.Column):
         self.cart_items = []
         self.cart_total = 0.0
         self._target_product_for_delete = None
+        self.products_count_label = ft.Text("0 ítems", size=11, color=TEXT_MUTED)
 
         # Product management dialog fields
         self.prod_name_field = ft.TextField(
@@ -62,6 +61,7 @@ class POSView(ft.Column):
             label="Precio ($)",
             hint_text="Ej: 2.50",
             keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.InputFilter(allow=True, regex_string=r"^\d*\.?\d{0,2}$", replacement_string=""),
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
@@ -73,6 +73,7 @@ class POSView(ft.Column):
             label="Cantidad en Stock",
             hint_text="Ej: 20",
             keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.NumbersOnlyInputFilter(),
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
@@ -163,11 +164,14 @@ class POSView(ft.Column):
             controls=self._build_product_rows(),
             spacing=8,
             scroll=ft.ScrollMode.AUTO,
+            expand=True,
         )
 
         self.cart_list = ft.Column(
             controls=self._build_cart_rows(),
             spacing=8,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
         )
 
         # Bimonetary total controls
@@ -178,6 +182,7 @@ class POSView(ft.Column):
             controls=self._build_sales_log(),
             spacing=8,
             scroll=ft.ScrollMode.AUTO,
+            expand=True,
         )
 
         self.controls = [
@@ -215,13 +220,14 @@ class POSView(ft.Column):
                                     controls=[
                                         heading_text("Inventario / Stock", size=FONT_SIZE_MD),
                                         ft.Container(expand=True),
-                                        ft.Text(f"{len(POS_PRODUCTS)} ítems", size=11, color=TEXT_MUTED),
+                                        self.products_count_label,
                                     ],
                                 ),
                                 ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=4, bottom=8)),
-                                self.products_column,
+                                ft.Container(content=self.products_column, expand=True),
                             ],
                             spacing=8,
+                            expand=True,
                         ),
                         expand=1,
                         **card_style(),
@@ -232,7 +238,7 @@ class POSView(ft.Column):
                             controls=[
                                 heading_text("Carrito de Compra", size=FONT_SIZE_MD),
                                 ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=8, bottom=12)),
-                                self.cart_list,
+                                ft.Container(content=self.cart_list, expand=True),
                                 ft.Container(height=1, bgcolor=BORDER),
                                 ft.Row(
                                     controls=[
@@ -268,6 +274,7 @@ class POSView(ft.Column):
                                 ),
                             ],
                             spacing=12,
+                            expand=True,
                         ),
                         expand=1,
                         **card_style(),
@@ -278,9 +285,10 @@ class POSView(ft.Column):
                             controls=[
                                 heading_text("Ventas del Día", size=FONT_SIZE_MD),
                                 ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=8, bottom=12)),
-                                self.sales_log,
+                                ft.Container(content=self.sales_log, expand=True),
                             ],
                             spacing=8,
+                            expand=True,
                         ),
                         expand=1,
                         **card_style(),
@@ -294,10 +302,15 @@ class POSView(ft.Column):
     def did_mount(self):
         event_bus.subscribe("sales_changed", self._on_sales_changed)
         event_bus.subscribe("bcv_updated", self._on_bcv_updated)
+        event_bus.subscribe("pos_products_changed", self._on_pos_products_changed)
 
     def will_unmount(self):
         event_bus.unsubscribe("sales_changed", self._on_sales_changed)
         event_bus.unsubscribe("bcv_updated", self._on_bcv_updated)
+        event_bus.unsubscribe("pos_products_changed", self._on_pos_products_changed)
+
+    def _on_pos_products_changed(self, data=None):
+        self._refresh_product_list()
 
     def _on_sales_changed(self, data=None):
         self._refresh_product_list()
@@ -336,8 +349,11 @@ class POSView(ft.Column):
 
     def _build_product_rows(self):
         rows = []
-        for p in POS_PRODUCTS:
-            stock = p.get("stock", 0)
+        products = POSProductRepository.list_products(active_only=True)
+        self.products_count_label.value = f"{len(products)} ítems"
+        for p in products:
+            stock = int(p.get("stock", 0))
+            price = float(p.get("precio", 0.0))
             stock_color = ACCENT_SUCCESS if stock > 5 else (ACCENT_DANGER if stock == 0 else "#f59e0b")
             stock_badge = f"{stock} disp." if stock > 0 else "Agotado"
 
@@ -355,9 +371,9 @@ class POSView(ft.Column):
                                     ft.Text(p["nombre"], size=FONT_SIZE_SM, color=TEXT_PRIMARY, weight="w600"),
                                     ft.Row(
                                         controls=[
-                                            ft.Text(f"${p['precio']:.2f}", size=FONT_SIZE_XS, color=TEXT_SECONDARY),
+                                            ft.Text(f"${price:.2f}", size=FONT_SIZE_XS, color=TEXT_SECONDARY),
                                             ft.Text("•", size=10, color=TEXT_MUTED),
-                                            ft.Text(bcv_service.format_bs(bcv_service.to_bs(p["precio"])), size=11, color=ACCENT_PRIMARY),
+                                            ft.Text(bcv_service.format_bs(bcv_service.to_bs(price)), size=11, color=ACCENT_PRIMARY),
                                             ft.Text("•", size=10, color=TEXT_MUTED),
                                             ft.Text(stock_badge, size=11, color=stock_color, weight="w600"),
                                         ],
@@ -419,60 +435,88 @@ class POSView(ft.Column):
         if hasattr(self, "page") and self.page:
             try:
                 self.products_column.update()
+                self.products_count_label.update()
             except Exception:
                 pass
 
     def _open_new_product_dialog(self, e):
+        self._editing_product_original_name = None
         self.product_dialog_title.value = "Nuevo Producto"
         self.prod_name_field.read_only = False
         self.prod_name_field.value = ""
+        self.prod_name_field.error_text = None
         self.prod_price_field.value = ""
+        self.prod_price_field.error_text = None
         self.prod_stock_field.value = ""
+        self.prod_stock_field.error_text = None
         self.prod_cat_field.value = "General"
         self._open_modal(self.product_dialog)
 
     def _open_edit_product_dialog(self, product: dict):
+        self._editing_product_original_name = product.get("nombre", "")
         self.product_dialog_title.value = f"Editar: {product['nombre']}"
         self.prod_name_field.value = product.get("nombre", "")
-        self.prod_name_field.read_only = True
+        self.prod_name_field.read_only = False
+        self.prod_name_field.error_text = None
         self.prod_price_field.value = str(product.get("precio", 0.0))
+        self.prod_price_field.error_text = None
         self.prod_stock_field.value = str(product.get("stock", 0))
+        self.prod_stock_field.error_text = None
         self.prod_cat_field.value = product.get("categoria", "General")
         self._open_modal(self.product_dialog)
 
     def _save_product_action(self, e):
+        self.prod_name_field.error_text = None
+        self.prod_price_field.error_text = None
+        self.prod_stock_field.error_text = None
+
+        has_error = False
         nombre = (self.prod_name_field.value or "").strip()
         if not nombre or len(nombre) < 2:
-            self._show_notification("El nombre del producto debe tener al menos 2 letras", ACCENT_DANGER)
-            return
+            self.prod_name_field.error_text = "El nombre debe tener al menos 2 letras"
+            has_error = True
 
+        raw_price = (self.prod_price_field.value or "").strip()
         try:
-            precio = float(self.prod_price_field.value or 0.0)
+            precio = float(raw_price or 0.0)
             if precio <= 0:
-                self._show_notification("El precio debe ser mayor a 0.00", ACCENT_DANGER)
-                return
+                self.prod_price_field.error_text = "El precio debe ser mayor a 0.00"
+                has_error = True
         except ValueError:
-            self._show_notification("El precio debe ser un número válido (ej: 2.50)", ACCENT_DANGER)
-            return
+            self.prod_price_field.error_text = "Precio numérico inválido (ej: 2.50)"
+            has_error = True
 
+        raw_stock = (self.prod_stock_field.value or "").strip()
         try:
-            stock = int(self.prod_stock_field.value or 0)
+            stock = int(raw_stock or 0)
             if stock < 0:
-                self._show_notification("El stock no puede ser negativo", ACCENT_DANGER)
-                return
+                self.prod_stock_field.error_text = "El stock no puede ser negativo"
+                has_error = True
         except ValueError:
-            self._show_notification("El stock debe ser un número entero (ej: 10)", ACCENT_DANGER)
+            self.prod_stock_field.error_text = "El stock debe ser un número entero (ej: 10)"
+            has_error = True
+
+        if has_error:
+            self.prod_name_field.update()
+            self.prod_price_field.update()
+            self.prod_stock_field.update()
             return
 
         cat = (self.prod_cat_field.value or "General").strip()
 
-        add_or_update_product({
-            "nombre": nombre,
-            "precio": precio,
-            "stock": stock,
-            "categoria": cat,
-        })
+        orig_name = getattr(self, "_editing_product_original_name", None)
+        ok, msg = POSProductRepository.save_product(
+            nombre=nombre,
+            precio=precio,
+            stock=stock,
+            is_active=True,
+            old_name=orig_name,
+        )
+        if not ok:
+            self._show_notification(f"Error al guardar: {msg}", ACCENT_DANGER)
+            return
 
+        event_bus.publish("pos_products_changed", {})
         self._refresh_product_list()
         self._close_modal(self.product_dialog)
         self._show_notification(f"Producto '{nombre}' guardado exitosamente.", ACCENT_SUCCESS)
@@ -488,7 +532,8 @@ class POSView(ft.Column):
             return
 
         nombre = prod.get("nombre", "")
-        remove_product(nombre)
+        ok, msg = POSProductRepository.delete_product(nombre)
+        event_bus.publish("pos_products_changed", {})
         self._refresh_product_list()
         self._close_modal(self.delete_product_dialog)
         self._show_notification(f"Producto '{nombre}' eliminado del inventario", ACCENT_DANGER)
@@ -550,8 +595,10 @@ class POSView(ft.Column):
         return rows
 
     def _add_to_cart(self, producto, qty):
-        prod_stock = producto.get("stock", 0)
-        existing = next((c for c in self.cart_items if c["nombre"] == producto["nombre"]), None)
+        prod_stock = int(producto.get("stock", 0))
+        prod_name = producto.get("nombre", "")
+        prod_price = float(producto.get("precio", 0.0))
+        existing = next((c for c in self.cart_items if c["nombre"] == prod_name), None)
         current_cart_qty = existing["qty"] if existing else 0
 
         if current_cart_qty + qty > prod_stock:
@@ -560,13 +607,13 @@ class POSView(ft.Column):
 
         if existing:
             existing["qty"] += qty
-            existing["subtotal"] = existing["qty"] * producto["precio"]
+            existing["subtotal"] = existing["qty"] * prod_price
         else:
             self.cart_items.append({
-                "nombre": producto["nombre"],
+                "nombre": prod_name,
                 "qty": qty,
-                "precio": producto["precio"],
-                "subtotal": qty * producto["precio"],
+                "precio": prod_price,
+                "subtotal": qty * prod_price,
             })
 
         self._update_cart_totals()

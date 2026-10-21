@@ -219,10 +219,14 @@ class KioskView(ft.Container):
         )
 
     def _build_granted_hero(self, member: dict):
+        from core.business import compute_membership_urgency
         nombre = member.get("nombre", "Socio")
         first_name = nombre.split()[0] if nombre else "SOCIO"
         plan = member.get("plan", "Básico")
         venc = member.get("vencimiento", "")
+        urgency = member.get("urgency") or compute_membership_urgency(member)
+        urg_hex = urgency.get("hex", "#10B981")
+        urg_label = urgency.get("label", "Vigente")
 
         return ft.Column(
             controls=[
@@ -232,7 +236,7 @@ class KioskView(ft.Container):
                     bgcolor=ft.Colors.with_opacity(0.18, ACCENT_SUCCESS),
                     border_radius=60,
                 ),
-                ft.Container(height=12),
+                ft.Container(height=10),
                 ft.Text(
                     f"¡BIENVENIDO, {first_name.upper()}!",
                     size=FONT_SIZE_2XL,
@@ -247,24 +251,47 @@ class KioskView(ft.Container):
                     weight="w700",
                     text_align=ft.TextAlign.CENTER,
                 ),
-                ft.Container(height=8),
-                ft.Row(
-                    controls=[
-                        ft.Container(
-                            content=ft.Text(f"Plan: {plan}", size=12, color=TEXT_PRIMARY, weight="w600"),
-                            bgcolor=BG_INPUT,
-                            padding=ft.padding.symmetric(horizontal=12, vertical=6),
-                            border_radius=RADIUS_SM,
-                        ),
-                        ft.Container(
-                            content=ft.Text(f"Vence: {venc}", size=12, color=TEXT_SECONDARY, weight="w500"),
-                            bgcolor=BG_INPUT,
-                            padding=ft.padding.symmetric(horizontal=12, vertical=6),
-                            border_radius=RADIUS_SM,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=12,
+                ft.Container(height=10),
+                # Prominent Plan & Days Remaining Card with Color Highlighting
+                ft.Container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Row(
+                                controls=[
+                                    ft.Icon(ft.Icons.CARD_MEMBERSHIP, size=18, color=urg_hex),
+                                    ft.Text(f"Plan: {plan.upper()}", size=14, color=TEXT_PRIMARY, weight="w700"),
+                                    ft.Container(expand=True),
+                                    ft.Container(
+                                        content=ft.Text(
+                                            urg_label.upper(),
+                                            size=12,
+                                            color=ft.Colors.WHITE,
+                                            weight="w800",
+                                        ),
+                                        bgcolor=urg_hex,
+                                        padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                                        border_radius=RADIUS_SM,
+                                    ),
+                                ],
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                            ft.Container(height=4),
+                            ft.Text(
+                                f"Fecha de vencimiento: {venc}",
+                                size=12,
+                                color=TEXT_SECONDARY,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=2,
+                    ),
+                    bgcolor=ft.Colors.with_opacity(0.15, urg_hex),
+                    border=ft.Border.all(1.5, urg_hex),
+                    padding=ft.padding.symmetric(horizontal=20, vertical=12),
+                    border_radius=RADIUS_MD,
+                    width=420,
                 ),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
@@ -472,6 +499,8 @@ class KioskView(ft.Container):
         from core.event_bus import event_bus
         event_bus.subscribe("access_scan", self._on_event_bus_scan)
         event_bus.subscribe("members_changed", self._on_event_bus_members_changed)
+        if nfc_reader.is_connected:
+            self._on_nfc_status_change(True, "ACR122U Activo")
 
     def will_unmount(self):
         from core.event_bus import event_bus
@@ -492,7 +521,7 @@ class KioskView(ft.Container):
 
     def _on_nfc_scan(self, uid: str):
         """Dispatched from the background NFC thread when a tag touches the ACR122U."""
-        process_nfc_scan(uid)
+        process_nfc_scan(uid, min_interval=3.0)
 
     def _handle_manual_input(self, e):
         raw = (self.manual_input.value or "").strip()

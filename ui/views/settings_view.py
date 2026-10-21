@@ -77,6 +77,8 @@ class SettingsView(ft.Column):
         self.expiry_days = ft.TextField(
             label="Días de alerta antes del vencimiento",
             value=str(APP_SETTINGS.get("expiry_alert_days", 7)),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.NumbersOnlyInputFilter(),
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
@@ -122,6 +124,7 @@ class SettingsView(ft.Column):
             label="Tasa Manual USD / VES (Bs)",
             value=f"{current_rate:.2f}",
             keyboard_type=ft.KeyboardType.NUMBER,
+            input_filter=ft.InputFilter(allow=True, regex_string=r"^\d*\.?\d{0,2}$", replacement_string=""),
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
             border_color=BORDER,
@@ -362,14 +365,17 @@ class SettingsView(ft.Column):
         ]
 
     def _save_manual_bcv(self, e):
+        self.bcv_rate_field.error_text = None
         raw = (self.bcv_rate_field.value or "").replace(",", ".").strip()
         try:
             val = float(raw)
             if val <= 0:
-                self._show_toast("La tasa debe ser mayor a 0", ACCENT_DANGER)
+                self.bcv_rate_field.error_text = "La tasa debe ser mayor a 0"
+                self.bcv_rate_field.update()
                 return
         except ValueError:
-            self._show_toast("Tasa inválida (ingrese un número como 52.40)", ACCENT_DANGER)
+            self.bcv_rate_field.error_text = "Tasa numérica inválida (ej: 52.40)"
+            self.bcv_rate_field.update()
             return
 
         bcv_service.set_manual_rate(val)
@@ -379,6 +385,7 @@ class SettingsView(ft.Column):
 
         if hasattr(self, "page") and self.page:
             try:
+                self.bcv_rate_field.update()
                 self.bcv_current_badge.update()
                 self.bcv_info_text.update()
             except Exception:
@@ -392,9 +399,14 @@ class SettingsView(ft.Column):
         if not success:
             rate = bcv_service.get_rate()
 
+        self.bcv_rate_field.error_text = None
         self.bcv_rate_field.value = f"{rate:.2f}"
         self.bcv_current_badge.value = f"{rate:.2f} Bs/USD"
-        self.bcv_info_text.value = f"Última actualización: {bcv_service.get_last_updated()} (Fuente: {bcv_service.get_source()})"
+        info_str = f"Última actualización: {bcv_service.get_last_updated()} (Fuente: {bcv_service.get_source()})"
+        fv = bcv_service.get_fecha_valor()
+        if fv:
+            info_str += f" • Fecha Valor: {fv}"
+        self.bcv_info_text.value = info_str
         event_bus.publish("bcv_updated", rate)
 
         if hasattr(self, "page") and self.page:
@@ -412,19 +424,33 @@ class SettingsView(ft.Column):
 
 
     def _save(self, e):
-        APP_SETTINGS["gym_name"] = (self.gym_name.value or "Gymsis").strip() or "Gymsis"
-        APP_SETTINGS["currency"] = self.currency.value or "USD"
+        self.gym_name.error_text = None
+        self.expiry_days.error_text = None
 
+        has_error = False
+        gym_name_val = (self.gym_name.value or "").strip()
+        if not gym_name_val:
+            self.gym_name.error_text = "El nombre del gimnasio no puede estar vacío"
+            has_error = True
+
+        raw_exp = (self.expiry_days.value or "").strip()
         try:
-            APP_SETTINGS["expiry_alert_days"] = max(0, int(self.expiry_days.value or "7"))
+            exp_days = int(raw_exp)
+            if exp_days < 0:
+                self.expiry_days.error_text = "Los días no pueden ser negativos"
+                has_error = True
         except ValueError:
-            APP_SETTINGS["expiry_alert_days"] = 7
-            self.expiry_days.value = "7"
-            try:
-                self.expiry_days.update()
-            except Exception:
-                pass
+            self.expiry_days.error_text = "Debe ser un número entero (ej: 7)"
+            has_error = True
 
+        if has_error:
+            self.gym_name.update()
+            self.expiry_days.update()
+            return
+
+        APP_SETTINGS["gym_name"] = gym_name_val
+        APP_SETTINGS["currency"] = self.currency.value or "USD"
+        APP_SETTINGS["expiry_alert_days"] = exp_days
         APP_SETTINGS["allow_inactive_access"] = bool(self.allow_inactive.value)
         APP_SETTINGS["enable_nfc_simulation"] = bool(self.enable_nfc.value)
         save_settings(APP_SETTINGS)

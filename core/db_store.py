@@ -4,6 +4,7 @@ with automatic schema migration, backup export/import, and Excel CSV exports.
 
 from __future__ import annotations
 
+import contextlib
 import csv
 from datetime import datetime, timedelta
 import json
@@ -24,27 +25,108 @@ def is_db_enabled() -> bool:
 
 def get_active_engine() -> str:
     """Return 'postgresql' if Postgres is running, else 'sqlite'."""
-    if is_postgres_enabled() and _connect_pg() is not None:
-        return "postgresql"
+    if is_postgres_enabled():
+        conn = _connect_pg()
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return "postgresql"
     return "sqlite"
+
 
 
 # ---------------------------------------------------------------------------
 # SQLite Engine (Local Zero-Config Storage)
 # ---------------------------------------------------------------------------
 
+import threading
+
+_thread_local = threading.local()
+
+
+class _ManagedConnection:
+    """Wrapper that prevents closing, beginning separate transactions, or committing when inside an active transaction."""
+    def __init__(self, raw_conn: sqlite3.Connection):
+        object.__setattr__(self, "_raw_conn", raw_conn)
+
+    def __getattr__(self, name: str):
+        return getattr(self._raw_conn, name)
+
+    def __setattr__(self, name: str, value: Any):
+        if name == "_raw_conn":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._raw_conn, name, value)
+
+    def close(self):
+        pass
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
 def _get_sqlite_path() -> str:
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    data_dir = os.path.join(base_dir, "data")
-    os.makedirs(data_dir, exist_ok=True)
-    return os.getenv("GYMSIS_SQLITE_PATH", os.path.join(data_dir, "gymsis.db"))
+    from core.paths import get_db_path
+    return get_db_path()
 
 
-def _connect_sqlite():
+def _connect_sqlite() -> sqlite3.Connection:
+    active_tx = getattr(_thread_local, "tx_conn", None)
+    if active_tx is not None:
+        return _ManagedConnection(active_tx)
+
     db_path = _get_sqlite_path()
-    conn = sqlite3.connect(db_path, timeout=15.0)
+    conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
+
+
+@contextlib.contextmanager
+def transaction(connection: Optional[sqlite3.Connection] = None):
+    """Atomic transaction manager for SQLite."""
+    existing = getattr(_thread_local, "tx_conn", None)
+    if existing is not None:
+        yield existing
+        return
+
+    raw_conn = connection or sqlite3.connect(_get_sqlite_path(), timeout=30.0, check_same_thread=False)
+    raw_conn.row_factory = sqlite3.Row
+    raw_conn.execute("PRAGMA journal_mode=WAL;")
+    raw_conn.execute("PRAGMA synchronous=NORMAL;")
+    raw_conn.execute("PRAGMA foreign_keys=ON;")
+
+    _thread_local.tx_conn = raw_conn
+    try:
+        raw_conn.execute("BEGIN IMMEDIATE;")
+        yield raw_conn
+        raw_conn.commit()
+    except Exception:
+        try:
+            raw_conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        _thread_local.tx_conn = None
+        if connection is None:
+            try:
+                raw_conn.close()
+            except Exception:
+                pass
 
 
 def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
@@ -57,6 +139,8 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         estado TEXT NOT NULL,
         nfc_id TEXT NOT NULL DEFAULT '',
         entrenando INTEGER NOT NULL DEFAULT 0,
+        creado_por TEXT DEFAULT 'sistema',
+        telefono TEXT DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
 
@@ -88,7 +172,18 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         precio REAL NOT NULL DEFAULT 0.0,
         stock INTEGER NOT NULL DEFAULT 0,
         categoria TEXT NOT NULL DEFAULT 'General',
-        icono TEXT NOT NULL DEFAULT 'INVENTORY'
+        icono TEXT NOT NULL DEFAULT 'INVENTORY',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS pos_products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL UNIQUE,
+        precio REAL NOT NULL DEFAULT 0.0,
+        stock INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
 
     CREATE TABLE IF NOT EXISTS membership_payments (
@@ -102,6 +197,10 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         dias INTEGER NOT NULL DEFAULT 30,
         metodo TEXT NOT NULL DEFAULT 'efectivo',
         nota TEXT NOT NULL DEFAULT '',
+        referencia TEXT DEFAULT '',
+        tasa_tipo TEXT DEFAULT 'BCV',
+        tasa_valor REAL DEFAULT 0.0,
+        registrado_por TEXT DEFAULT 'sistema',
         fecha_pago TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
     );
 
@@ -113,12 +212,52 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         descripcion TEXT NOT NULL DEFAULT '',
         is_active INTEGER NOT NULL DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS member_nfc_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cedula TEXT NOT NULL,
+        nfc_id TEXT NOT NULL UNIQUE,
+        alias TEXT NOT NULL DEFAULT 'Llavero',
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        FOREIGN KEY (cedula) REFERENCES members(cedula) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'viewer',
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        action TEXT NOT NULL,
+        details TEXT NOT NULL,
+        ip_address TEXT DEFAULT '127.0.0.1',
+        timestamp TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_members_nombre ON members(nombre);
+    CREATE INDEX IF NOT EXISTS idx_members_nfc ON members(nfc_id);
+    CREATE INDEX IF NOT EXISTS idx_member_nfc_keys_uid ON member_nfc_keys(nfc_id);
+    CREATE INDEX IF NOT EXISTS idx_member_nfc_keys_cedula ON member_nfc_keys(cedula);
+    CREATE INDEX IF NOT EXISTS idx_access_log_event_time ON access_log(event_time DESC);
+    CREATE INDEX IF NOT EXISTS idx_access_log_cedula ON access_log(cedula);
+    CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales(sold_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_payments_cedula ON membership_payments(cedula);
+    CREATE INDEX IF NOT EXISTS idx_payments_fecha ON membership_payments(fecha_pago DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(username);
     """
     with conn:
         conn.executescript(schema_sql)
 
-    # Automatic schema migration: verify columns in case an older version database is opened
     cur = conn.cursor()
+    # Check members columns
     cur.execute("PRAGMA table_info(members)")
     cols = {row["name"] for row in cur.fetchall()}
     if "nfc_id" not in cols:
@@ -127,6 +266,51 @@ def _ensure_sqlite_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE members ADD COLUMN entrenando INTEGER NOT NULL DEFAULT 0")
     if "updated_at" not in cols:
         conn.execute("ALTER TABLE members ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))")
+    if "telefono" not in cols:
+        conn.execute("ALTER TABLE members ADD COLUMN telefono TEXT DEFAULT ''")
+    if "creado_por" not in cols:
+        conn.execute("ALTER TABLE members ADD COLUMN creado_por TEXT DEFAULT 'sistema'")
+
+    # Migrate pos_products into products if products table is empty
+    try:
+        cur.execute("SELECT COUNT(*) FROM products")
+        if cur.fetchone()[0] == 0:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pos_products'")
+            if cur.fetchone():
+                conn.execute("""
+                    INSERT OR IGNORE INTO products (nombre, precio, stock, is_active, updated_at)
+                    SELECT nombre, precio, stock, is_active, updated_at FROM pos_products;
+                """)
+    except Exception:
+        pass
+
+    # Ensure columns in products
+    try:
+        cur.execute("PRAGMA table_info(products)")
+        pcols = {row["name"] for row in cur.fetchall()}
+        if "is_active" not in pcols:
+            conn.execute("ALTER TABLE products ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        if "updated_at" not in pcols:
+            conn.execute("ALTER TABLE products ADD COLUMN updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))")
+    except Exception:
+        pass
+
+    # Ensure default users
+    try:
+        cur.execute("SELECT COUNT(*) FROM users")
+        if cur.fetchone()[0] == 0:
+            from core.local_db import _hash_password
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, is_active) VALUES (?, ?, ?, 1)",
+                ("admin", _hash_password("admin123"), "admin"),
+            )
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, is_active) VALUES (?, ?, ?, 1)",
+                ("gerente", _hash_password("gerente123"), "admin"),
+            )
+    except Exception:
+        pass
+
     conn.commit()
 
 
@@ -138,10 +322,43 @@ def _get_pg_database_url() -> str:
     return os.getenv("DATABASE_URL", "postgresql://gymsis:gymsis_dev@localhost:5433/gymsis")
 
 
+class _PGConnectionWrapper:
+    """Wrapper around psycopg connection that ensures closing upon exiting transaction blocks."""
+
+    def __init__(self, raw_conn):
+        self._raw_conn = raw_conn
+
+    def __getattr__(self, name):
+        return getattr(self._raw_conn, name)
+
+    def __enter__(self):
+        if hasattr(self._raw_conn, "__enter__"):
+            self._raw_conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if hasattr(self._raw_conn, "__exit__"):
+                return self._raw_conn.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self.close()
+
+    def close(self):
+        try:
+            if hasattr(self._raw_conn, "close"):
+                return self._raw_conn.close()
+        except Exception:
+            pass
+
+    def cursor(self, *args, **kwargs):
+        return self._raw_conn.cursor(*args, **kwargs)
+
+
 def _connect_pg():
     try:
         import psycopg
-        return psycopg.connect(_get_pg_database_url(), autocommit=True)
+        raw_conn = psycopg.connect(_get_pg_database_url(), autocommit=True)
+        return _PGConnectionWrapper(raw_conn)
     except Exception:
         return None
 
@@ -212,10 +429,22 @@ def _ensure_pg_schema(conn) -> None:
         descripcion TEXT NOT NULL DEFAULT '',
         is_active BOOLEAN NOT NULL DEFAULT TRUE
     );
+
+    CREATE TABLE IF NOT EXISTS member_nfc_keys (
+        id SERIAL PRIMARY KEY,
+        cedula VARCHAR(20) NOT NULL REFERENCES members(cedula) ON DELETE CASCADE,
+        nfc_id VARCHAR(64) NOT NULL UNIQUE,
+        alias VARCHAR(100) NOT NULL DEFAULT 'Llavero',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_member_nfc_keys_uid ON member_nfc_keys(nfc_id);
+    CREATE INDEX IF NOT EXISTS idx_member_nfc_keys_cedula ON member_nfc_keys(cedula);
     """
     with conn:
         with conn.cursor() as cur:
             cur.execute(schema_sql)
+            cur.execute("ALTER TABLE members ADD COLUMN IF NOT EXISTS telefono TEXT DEFAULT '';")
+            cur.execute("ALTER TABLE members ADD COLUMN IF NOT EXISTS creado_por TEXT DEFAULT 'sistema';")
 
 
 # ---------------------------------------------------------------------------
@@ -253,51 +482,40 @@ def hydrate_mock_data_from_db() -> bool:
     except Exception:
         return False
 
+    md.MEMBERS.clear()
     if members:
-        md.MEMBERS.clear()
         md.MEMBERS.extend(members)
-        md.rebuild_member_index()
+    md.rebuild_member_index()
+    try:
+        from core.business import sync_member_statuses
+        sync_member_statuses()
+    except Exception:
+        pass
 
+    md.ACCESS_LOG.clear()
     if access_log:
-        md.ACCESS_LOG.clear()
         md.ACCESS_LOG.extend(access_log)
 
+    md.DAILY_SALES.clear()
     if sales:
-        md.DAILY_SALES.clear()
         md.DAILY_SALES.extend(sales)
         md.DAILY_INCOME = sum(float(s.get("monto", 0)) for s in sales)
+    else:
+        md.DAILY_INCOME = 0.0
 
     if settings:
         md.APP_SETTINGS.update(settings)
 
-    if not products:
-        # Seed default inventory items if table is brand new
-        defaults = [
-            {"nombre": "Agua Mineral 500ml", "precio": 1.00, "stock": 40, "categoria": "Bebidas", "icono": "LOCAL_DRINK"},
-            {"nombre": "Bebida Isotónica 600ml", "precio": 2.50, "stock": 25, "categoria": "Bebidas", "icono": "LOCAL_DRINK"},
-            {"nombre": "Barra Proteica Chocolate", "precio": 3.00, "stock": 20, "categoria": "Suplementos", "icono": "FITNESS_CENTER"},
-            {"nombre": "Batido Proteína Whey", "precio": 4.50, "stock": 15, "categoria": "Suplementos", "icono": "LOCAL_CAFE"},
-            {"nombre": "Toalla Gymsis Microfibra", "precio": 6.00, "stock": 10, "categoria": "Accesorios", "icono": "DRY_CLEANING"},
-        ]
-        for it in defaults:
-            save_product(it)
-        products = load_products()
-
+    md.POS_PRODUCTS.clear()
     if products:
-        md.POS_PRODUCTS.clear()
         md.POS_PRODUCTS.extend(products)
 
     plans = load_plans(active_only=True)
     if not plans:
         defaults_plans = [
-            {"nombre": "Mensual", "precio": 30.00, "dias": 30, "descripcion": "Acceso ilimitado a sala de pesas y máquinas", "is_active": 1},
-            {"nombre": "Quincenal", "precio": 18.00, "dias": 15, "descripcion": "Acceso libre por 15 días continuos", "is_active": 1},
-            {"nombre": "Semanal", "precio": 10.00, "dias": 7, "descripcion": "Pase semanal completo", "is_active": 1},
-            {"nombre": "Pase Diario", "precio": 3.00, "dias": 1, "descripcion": "Entrenamiento individual por el día", "is_active": 1},
-            {"nombre": "Trimestral", "precio": 80.00, "dias": 90, "descripcion": "3 meses con descuento especial", "is_active": 1},
-            {"nombre": "VIP", "precio": 50.00, "dias": 30, "descripcion": "Acceso total + clases grupales y lockers", "is_active": 1},
-            {"nombre": "Estudiante", "precio": 20.00, "dias": 30, "descripcion": "Tarifa especial presentando carnet", "is_active": 1},
-            {"nombre": "Basico", "precio": 25.00, "dias": 30, "descripcion": "Acceso regular a sala de musculación", "is_active": 1},
+            {"nombre": "Pase Diario", "precio": 2.50, "dias": 1, "descripcion": "Entrenamiento individual por el día", "is_active": 1},
+            {"nombre": "Semanal", "precio": 7.00, "dias": 7, "descripcion": "Pase semanal completo", "is_active": 1},
+            {"nombre": "Mensual", "precio": 20.00, "dias": 30, "descripcion": "Acceso ilimitado a sala de pesas y máquinas", "is_active": 1},
         ]
         for dp in defaults_plans:
             save_plan(dp)
@@ -311,6 +529,12 @@ def hydrate_mock_data_from_db() -> bool:
                 "dias": int(p["dias"]),
                 "descripcion": p.get("descripcion", ""),
             }
+
+    try:
+        sync_initial_nfc_keys()
+        md.refresh_nfc_keys_cache()
+    except Exception:
+        pass
 
     try:
         from core.audio_service import audio
@@ -331,7 +555,7 @@ def load_members() -> List[Dict[str, Any]]:
         conn = _connect_pg()
         if conn:
             query = """
-            SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando
+            SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por
             FROM members ORDER BY nombre ASC;
             """
             with conn:
@@ -347,6 +571,8 @@ def load_members() -> List[Dict[str, Any]]:
                     "estado": r[4],
                     "nfc_id": r[5] or "",
                     "entrenando": bool(r[6]),
+                    "telefono": r[7] if len(r) > 7 and r[7] else "",
+                    "creado_por": r[8] if len(r) > 8 and r[8] else "sistema",
                 }
                 for r in rows
             ]
@@ -354,7 +580,7 @@ def load_members() -> List[Dict[str, Any]]:
     # SQLite
     conn = _connect_sqlite()
     cur = conn.cursor()
-    cur.execute("SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando FROM members ORDER BY nombre ASC")
+    cur.execute("SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por FROM members ORDER BY nombre ASC")
     rows = cur.fetchall()
     members = [
         {
@@ -365,11 +591,174 @@ def load_members() -> List[Dict[str, Any]]:
             "estado": r["estado"],
             "nfc_id": r["nfc_id"] or "",
             "entrenando": bool(r["entrenando"]),
+            "telefono": r["telefono"] if "telefono" in r.keys() else "",
+            "creado_por": r["creado_por"] if "creado_por" in r.keys() else "sistema",
         }
         for r in rows
     ]
     conn.close()
     return members
+
+
+def find_member_by_cedula(cedula: str) -> Optional[dict]:
+    """Find a single member by cedula directly with indexed SQLite query."""
+    clean = (cedula or "").strip().upper()
+    if not clean:
+        return None
+    conn = _connect_sqlite()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por
+            FROM members WHERE UPPER(cedula) = ? LIMIT 1
+            """,
+            (clean,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "cedula": row["cedula"],
+                "nombre": row["nombre"],
+                "plan": row["plan"],
+                "vencimiento": row["vencimiento"],
+                "estado": row["estado"],
+                "nfc_id": row["nfc_id"] or "",
+                "entrenando": bool(row["entrenando"]),
+                "telefono": row["telefono"] if "telefono" in row.keys() else "",
+                "creado_por": row["creado_por"] if "creado_por" in row.keys() else "sistema",
+            }
+        # Fallback with standard Venezuelan prefix variations
+        digits = "".join(c for c in clean if c.isdigit())
+        if digits:
+            cand_cedulas = [digits] + [f"{p}{digits}" for p in ("V-", "E-", "J-", "G-", "P-", "V", "E")]
+            placeholders = ",".join("?" for _ in cand_cedulas)
+            cur.execute(
+                f"""
+                SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por
+                FROM members WHERE UPPER(cedula) IN ({placeholders}) LIMIT 1
+                """,
+                cand_cedulas,
+            )
+            row = cur.fetchone()
+            if row:
+                return {
+                    "cedula": row["cedula"],
+                    "nombre": row["nombre"],
+                    "plan": row["plan"],
+                    "vencimiento": row["vencimiento"],
+                    "estado": row["estado"],
+                    "nfc_id": row["nfc_id"] or "",
+                    "entrenando": bool(row["entrenando"]),
+                    "telefono": row["telefono"] if "telefono" in row.keys() else "",
+                    "creado_por": row["creado_por"] if "creado_por" in row.keys() else "sistema",
+                }
+        return None
+    finally:
+        conn.close()
+
+
+def find_member_by_nfc_id(nfc_id: str) -> Optional[dict]:
+    """Find a member by their primary or auxiliary NFC tag UID."""
+    clean = "".join(c for c in (nfc_id or "").upper() if c.isalnum())
+    if not clean:
+        return None
+    conn = _connect_sqlite()
+    try:
+        cur = conn.cursor()
+        # 1. Auxiliary keys table
+        cur.execute(
+            """
+            SELECT m.cedula, m.nombre, m.plan, m.vencimiento, m.estado, m.nfc_id, m.entrenando, m.telefono, m.creado_por
+            FROM member_nfc_keys k
+            JOIN members m ON UPPER(k.cedula) = UPPER(m.cedula)
+            WHERE UPPER(k.nfc_id) = ?
+            LIMIT 1
+            """,
+            (clean,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "cedula": row["cedula"],
+                "nombre": row["nombre"],
+                "plan": row["plan"],
+                "vencimiento": row["vencimiento"],
+                "estado": row["estado"],
+                "nfc_id": row["nfc_id"] or "",
+                "entrenando": bool(row["entrenando"]),
+                "telefono": row["telefono"] if "telefono" in row.keys() else "",
+                "creado_por": row["creado_por"] if "creado_por" in row.keys() else "sistema",
+            }
+        # 2. Primary nfc_id on members table
+        cur.execute(
+            """
+            SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por
+            FROM members
+            WHERE UPPER(nfc_id) = ?
+            LIMIT 1
+            """,
+            (clean,),
+        )
+        row = cur.fetchone()
+        if row:
+            return {
+                "cedula": row["cedula"],
+                "nombre": row["nombre"],
+                "plan": row["plan"],
+                "vencimiento": row["vencimiento"],
+                "estado": row["estado"],
+                "nfc_id": row["nfc_id"] or "",
+                "entrenando": bool(row["entrenando"]),
+                "telefono": row["telefono"] if "telefono" in row.keys() else "",
+                "creado_por": row["creado_por"] if "creado_por" in row.keys() else "sistema",
+            }
+        return None
+    finally:
+        conn.close()
+
+
+def search_members(query: str, limit: int = 100) -> List[dict]:
+    """Search members by cedula or name directly with indexed SQL."""
+    q = (query or "").strip().upper()
+    conn = _connect_sqlite()
+    try:
+        cur = conn.cursor()
+        if not q:
+            cur.execute(
+                """
+                SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por
+                FROM members ORDER BY nombre ASC LIMIT ?
+                """,
+                (limit,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por
+                FROM members
+                WHERE UPPER(cedula) LIKE ? OR UPPER(nombre) LIKE ?
+                ORDER BY nombre ASC LIMIT ?
+                """,
+                (f"%{q}%", f"%{q}%", limit),
+            )
+        rows = cur.fetchall()
+        return [
+            {
+                "cedula": r["cedula"],
+                "nombre": r["nombre"],
+                "plan": r["plan"],
+                "vencimiento": r["vencimiento"],
+                "estado": r["estado"],
+                "nfc_id": r["nfc_id"] or "",
+                "entrenando": bool(r["entrenando"]),
+                "telefono": r["telefono"] if "telefono" in r.keys() else "",
+                "creado_por": r["creado_por"] if "creado_por" in r.keys() else "sistema",
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
 
 
 def save_member(member: Dict[str, Any]) -> bool:
@@ -383,14 +772,16 @@ def save_member(member: Dict[str, Any]) -> bool:
     estado = (member.get("estado") or "Activo").strip()
     nfc_id = (member.get("nfc_id") or "").strip().upper()
     entrenando = int(bool(member.get("entrenando", False)))
+    telefono = (member.get("telefono") or "").strip()
+    creado_por = (member.get("creado_por") or "sistema").strip()
 
     engine = get_active_engine()
     if engine == "postgresql":
         conn = _connect_pg()
         if conn:
             query = """
-            INSERT INTO members (cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            INSERT INTO members (cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (cedula) DO UPDATE SET
                 nombre = EXCLUDED.nombre,
                 plan = EXCLUDED.plan,
@@ -398,12 +789,14 @@ def save_member(member: Dict[str, Any]) -> bool:
                 estado = EXCLUDED.estado,
                 nfc_id = EXCLUDED.nfc_id,
                 entrenando = EXCLUDED.entrenando,
+                telefono = EXCLUDED.telefono,
+                creado_por = EXCLUDED.creado_por,
                 updated_at = NOW();
             """
             try:
                 with conn:
                     with conn.cursor() as cur:
-                        cur.execute(query, (cedula, nombre, plan, vencimiento, estado, nfc_id, bool(entrenando)))
+                        cur.execute(query, (cedula, nombre, plan, vencimiento, estado, nfc_id, bool(entrenando), telefono, creado_por))
                 return True
             except Exception:
                 pass
@@ -411,8 +804,8 @@ def save_member(member: Dict[str, Any]) -> bool:
     # SQLite
     conn = _connect_sqlite()
     query = """
-    INSERT INTO members (cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+    INSERT INTO members (cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
     ON CONFLICT(cedula) DO UPDATE SET
         nombre = excluded.nombre,
         plan = excluded.plan,
@@ -420,11 +813,13 @@ def save_member(member: Dict[str, Any]) -> bool:
         estado = excluded.estado,
         nfc_id = excluded.nfc_id,
         entrenando = excluded.entrenando,
+        telefono = excluded.telefono,
+        creado_por = excluded.creado_por,
         updated_at = datetime('now', 'localtime');
     """
     try:
         with conn:
-            conn.execute(query, (cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando))
+            conn.execute(query, (cedula, nombre, plan, vencimiento, estado, nfc_id, entrenando, telefono, creado_por))
         return True
     finally:
         conn.close()
@@ -455,18 +850,257 @@ def delete_member(cedula: str) -> bool:
         conn.close()
 
 
-def load_access_log(limit: int = 500) -> List[Dict[str, Any]]:
+def load_member_nfc_keys(cedula: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieve all registered NFC keys, optionally filtered by member cedula."""
+    engine = get_active_engine()
+    clean_cedula = (cedula or "").strip().upper() if cedula else None
+
+    if engine == "postgresql":
+        conn = _connect_pg()
+        if conn:
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        if clean_cedula:
+                            cur.execute(
+                                "SELECT id, cedula, nfc_id, alias, created_at FROM member_nfc_keys WHERE UPPER(cedula) = %s ORDER BY id ASC;",
+                                (clean_cedula,),
+                            )
+                        else:
+                            cur.execute(
+                                "SELECT id, cedula, nfc_id, alias, created_at FROM member_nfc_keys ORDER BY id ASC;"
+                            )
+                        rows = cur.fetchall()
+                        return [
+                            {
+                                "id": r[0],
+                                "cedula": r[1],
+                                "nfc_id": r[2],
+                                "alias": r[3] or "Llavero",
+                                "created_at": str(r[4]) if r[4] else "",
+                            }
+                            for r in rows
+                        ]
+            except Exception as e:
+                logger.debug(f"[DB] Error loading pg nfc keys: {e}")
+
+    conn = _connect_sqlite()
+    try:
+        cur = conn.cursor()
+        if clean_cedula:
+            cur.execute(
+                "SELECT id, cedula, nfc_id, alias, created_at FROM member_nfc_keys WHERE UPPER(cedula) = ? ORDER BY id ASC",
+                (clean_cedula,),
+            )
+        else:
+            cur.execute("SELECT id, cedula, nfc_id, alias, created_at FROM member_nfc_keys ORDER BY id ASC")
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r["id"],
+                "cedula": r["cedula"],
+                "nfc_id": r["nfc_id"],
+                "alias": r["alias"] or "Llavero",
+                "created_at": str(r["created_at"]) if r["created_at"] else "",
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.debug(f"[DB] Error loading sqlite nfc keys: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def add_member_nfc_key(cedula: str, nfc_id: str, alias: str = "Llavero") -> Tuple[bool, str]:
+    """Register an additional NFC key (phone, card, fob) for a member."""
+    clean_cedula = (cedula or "").strip().upper()
+    clean_uid = "".join(c for c in (nfc_id or "").upper() if c.isalnum())
+    clean_alias = (alias or "Llavero").strip()
+
+    if not clean_cedula:
+        return False, "Cédula de socio inválida"
+    if not clean_uid:
+        return False, "El UID de la tarjeta o dispositivo NFC no puede estar vacío"
+
+    # Check for duplicate across all members
+    existing_keys = load_member_nfc_keys()
+    for k in existing_keys:
+        if k["nfc_id"] == clean_uid:
+            if k["cedula"].upper() == clean_cedula:
+                return False, f"Esta llave ya está registrada para este socio con el alias '{k.get('alias')}'"
+            owner_name = ""
+            try:
+                owner = find_member_by_cedula(k["cedula"])
+                if owner:
+                    owner_name = f"{owner.get('nombre', '')} "
+            except Exception:
+                pass
+            return False, f"Esta llave NFC ya pertenece a {owner_name}(Cédula: {k['cedula']})"
+
     engine = get_active_engine()
     if engine == "postgresql":
         conn = _connect_pg()
         if conn:
-            query = """
-            SELECT nombre, plan, status, cedula, event_time
-            FROM access_log ORDER BY event_time DESC LIMIT %s;
-            """
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO member_nfc_keys (cedula, nfc_id, alias, created_at) VALUES (%s, %s, %s, NOW());",
+                            (clean_cedula, clean_uid, clean_alias),
+                        )
+            except Exception as e:
+                logger.error(f"[DB] Error guardando llave NFC en PostgreSQL: {e}")
+
+    conn = _connect_sqlite()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO member_nfc_keys (cedula, nfc_id, alias) VALUES (?, ?, ?)",
+                (clean_cedula, clean_uid, clean_alias),
+            )
+    except Exception as e:
+        logger.error(f"[DB] Error guardando llave NFC en SQLite: {e}")
+        return False, f"Error en base de datos: {e}"
+    finally:
+        conn.close()
+
+    # Sync cache in mock_data
+    try:
+        from core import mock_data as md
+        md.refresh_nfc_keys_cache()
+    except Exception:
+        pass
+
+    return True, f"Llave '{clean_alias}' vinculada con éxito."
+
+
+def update_member_nfc_key(key_id: int, new_nfc_id: str, new_alias: str) -> Tuple[bool, str]:
+    """Edit an existing NFC key alias or overwrite its UID."""
+    clean_uid = "".join(c for c in (new_nfc_id or "").upper() if c.isalnum())
+    clean_alias = (new_alias or "Llavero").strip()
+
+    if not clean_uid:
+        return False, "El UID no puede estar vacío"
+
+    # Check duplicate on other keys
+    existing_keys = load_member_nfc_keys()
+    for k in existing_keys:
+        if k["id"] != key_id and k["nfc_id"] == clean_uid:
+            owner_name = ""
+            try:
+                owner = find_member_by_cedula(k["cedula"])
+                if owner:
+                    owner_name = f"{owner.get('nombre', '')} "
+            except Exception:
+                pass
+            return False, f"Esta llave NFC ya pertenece a {owner_name}(Cédula: {k['cedula']})"
+
+    engine = get_active_engine()
+    if engine == "postgresql":
+        conn = _connect_pg()
+        if conn:
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE member_nfc_keys SET nfc_id = %s, alias = %s WHERE id = %s;",
+                            (clean_uid, clean_alias, key_id),
+                        )
+            except Exception as e:
+                logger.error(f"[DB] Error actualizando llave NFC en PostgreSQL: {e}")
+
+    conn = _connect_sqlite()
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE member_nfc_keys SET nfc_id = ?, alias = ? WHERE id = ?",
+                (clean_uid, clean_alias, key_id),
+            )
+    except Exception as e:
+        logger.error(f"[DB] Error actualizando llave NFC en SQLite: {e}")
+        return False, f"Error en base de datos: {e}"
+    finally:
+        conn.close()
+
+    try:
+        from core import mock_data as md
+        md.refresh_nfc_keys_cache()
+    except Exception:
+        pass
+
+    return True, f"Llave actualizada a '{clean_alias}'"
+
+
+def delete_member_nfc_key(key_id: int) -> bool:
+    """Delete an NFC key by ID."""
+    engine = get_active_engine()
+    if engine == "postgresql":
+        conn = _connect_pg()
+        if conn:
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM member_nfc_keys WHERE id = %s;", (key_id,))
+            except Exception:
+                pass
+
+    conn = _connect_sqlite()
+    try:
+        with conn:
+            conn.execute("DELETE FROM member_nfc_keys WHERE id = ?", (key_id,))
+        try:
+            from core import mock_data as md
+            md.refresh_nfc_keys_cache()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def sync_initial_nfc_keys() -> int:
+    """Migrate legacy members.nfc_id to member_nfc_keys if not already present."""
+    try:
+        existing_keys = {k["nfc_id"]: k["cedula"] for k in load_member_nfc_keys()}
+        members = load_members()
+        migrated = 0
+        for m in members:
+            uid = "".join(c for c in (m.get("nfc_id") or "").upper() if c.isalnum())
+            cedula = (m.get("cedula") or "").strip().upper()
+            if uid and uid not in existing_keys:
+                add_member_nfc_key(cedula, uid, alias="Llavero Principal")
+                existing_keys[uid] = cedula
+                migrated += 1
+        return migrated
+    except Exception as e:
+        logger.debug(f"[DB] Error migrando llaves nfc iniciales: {e}")
+        return 0
+
+
+def load_access_log(cedula: Optional[str] = None, limit: int = 500) -> List[Dict[str, Any]]:
+    engine = get_active_engine()
+    if engine == "postgresql":
+        conn = _connect_pg()
+        if conn:
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute(query, (limit,))
+                    if cedula:
+                        query = """
+                        SELECT nombre, plan, status, cedula, event_time
+                        FROM access_log
+                        WHERE UPPER(cedula) = UPPER(%s)
+                        ORDER BY event_time DESC LIMIT %s;
+                        """
+                        cur.execute(query, (cedula.strip(), limit))
+                    else:
+                        query = """
+                        SELECT nombre, plan, status, cedula, event_time
+                        FROM access_log ORDER BY event_time DESC LIMIT %s;
+                        """
+                        cur.execute(query, (limit,))
                     rows = cur.fetchall()
             return [
                 {
@@ -475,24 +1109,33 @@ def load_access_log(limit: int = 500) -> List[Dict[str, Any]]:
                     "status": r[2],
                     "cedula": r[3],
                     "hora": r[4].strftime("%H:%M") if r[4] else "",
+                    "fecha": str(r[4].date()) if r[4] else "",
                 }
                 for r in rows
             ]
 
     conn = _connect_sqlite()
     cur = conn.cursor()
-    cur.execute(
-        "SELECT nombre, plan, status, cedula, event_time FROM access_log ORDER BY id DESC LIMIT ?",
-        (limit,),
-    )
+    if cedula:
+        cur.execute(
+            "SELECT nombre, plan, status, cedula, event_time FROM access_log WHERE UPPER(cedula) = UPPER(?) ORDER BY id DESC LIMIT ?",
+            (cedula.strip(), limit),
+        )
+    else:
+        cur.execute(
+            "SELECT nombre, plan, status, cedula, event_time FROM access_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
     rows = cur.fetchall()
     events = []
     for r in rows:
         time_str = r["event_time"] or ""
         if " " in time_str:
             time_part = time_str.split(" ")[1][:5]
+            fecha_part = time_str.split(" ")[0]
         else:
             time_part = time_str[:5]
+            fecha_part = ""
         events.append(
             {
                 "nombre": r["nombre"],
@@ -500,6 +1143,7 @@ def load_access_log(limit: int = 500) -> List[Dict[str, Any]]:
                 "status": r["status"],
                 "cedula": r["cedula"],
                 "hora": time_part,
+                "fecha": fecha_part,
             }
         )
     conn.close()
@@ -558,6 +1202,8 @@ def load_sales(limit: int = 500) -> List[Dict[str, Any]]:
                     "producto": r[0],
                     "monto": float(r[1]),
                     "hora": r[2].strftime("%H:%M") if r[2] else "",
+                    "fecha": str(r[2].date()) if r[2] else "",
+                    "sold_at": str(r[2]) if r[2] else "",
                 }
                 for r in rows
             ]
@@ -570,7 +1216,14 @@ def load_sales(limit: int = 500) -> List[Dict[str, Any]]:
     for r in rows:
         time_str = r["sold_at"] or ""
         time_part = time_str.split(" ")[1][:5] if " " in time_str else time_str[:5]
-        sales.append({"producto": r["producto"], "monto": float(r["monto"]), "hora": time_part})
+        fecha_part = time_str.split(" ")[0] if " " in time_str else (time_str[:10] if len(time_str) >= 10 else "")
+        sales.append({
+            "producto": r["producto"],
+            "monto": float(r["monto"]),
+            "hora": time_part,
+            "fecha": fecha_part,
+            "sold_at": time_str,
+        })
     conn.close()
     return sales
 
@@ -785,11 +1438,65 @@ def delete_product(nombre: str) -> bool:
         conn.close()
 
 
+def rename_product(old_nombre: str, product: Dict[str, Any]) -> bool:
+    """Update a product, allowing change of product name."""
+    old_clean = (old_nombre or "").strip()
+    new_nombre = (product.get("nombre") or "").strip()
+    if not new_nombre:
+        return False
+    if not old_clean or old_clean.lower() == new_nombre.lower():
+        return save_product(product)
+
+    precio = float(product.get("precio", 0.0))
+    stock = max(0, int(product.get("stock", 0)))
+    categoria = (product.get("categoria") or "General").strip()
+    icono = (product.get("icono") or "INVENTORY").strip()
+
+    engine = get_active_engine()
+    if engine == "postgresql":
+        conn = _connect_pg()
+        if conn:
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE products
+                            SET nombre = %s, precio = %s, stock = %s, categoria = %s, icono = %s
+                            WHERE LOWER(nombre) = LOWER(%s);
+                            """,
+                            (new_nombre, precio, stock, categoria, icono, old_clean),
+                        )
+                return True
+            except Exception:
+                pass
+
+    conn = _connect_sqlite()
+    try:
+        with conn:
+            conn.execute(
+                """
+                UPDATE products
+                SET nombre = ?, precio = ?, stock = ?, categoria = ?, icono = ?
+                WHERE LOWER(nombre) = LOWER(?);
+                """,
+                (new_nombre, precio, stock, categoria, icono, old_clean),
+            )
+        return True
+    finally:
+        conn.close()
+
+
 def deduct_product_stock(nombre: str, qty: int = 1) -> bool:
     """Subtract sold quantity from product stock (clamped at 0)."""
     clean_nombre = (nombre or "").strip()
     if not clean_nombre or qty <= 0:
         return False
+
+    try:
+        decrement_stock_product(clean_nombre, qty)
+    except Exception:
+        pass
 
     engine = get_active_engine()
     if engine == "postgresql":
@@ -954,6 +1661,108 @@ def load_membership_payments(cedula: Optional[str] = None, limit: int = 200) -> 
     ]
     conn.close()
     return payments
+
+
+def load_membership_payments_between(start_time_str: str, end_time_str: str) -> List[Dict[str, Any]]:
+    """Load membership payments between start and end timestamps directly via SQL."""
+    conn = _connect_sqlite()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, cedula, nombre, plan, monto, monto_bs, tasa_bcv, dias, metodo, nota, fecha_pago
+            FROM membership_payments
+            WHERE substr(fecha_pago, 1, 16) >= ? AND substr(fecha_pago, 1, 16) <= ?
+            ORDER BY fecha_pago ASC
+            """,
+            (start_time_str[:16], end_time_str[:16]),
+        )
+        return [
+            {
+                "id": r["id"],
+                "cedula": r["cedula"],
+                "nombre": r["nombre"] if "nombre" in r.keys() else "",
+                "plan": r["plan"],
+                "monto": float(r["monto"]),
+                "monto_bs": float(r["monto_bs"]) if "monto_bs" in r.keys() else 0.0,
+                "tasa_bcv": float(r["tasa_bcv"]) if "tasa_bcv" in r.keys() else 0.0,
+                "dias": r["dias"],
+                "metodo": r["metodo"],
+                "nota": r["nota"],
+                "fecha_pago": str(r["fecha_pago"]),
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def load_sales_between(start_time_str: str, end_time_str: str) -> List[Dict[str, Any]]:
+    """Load sales between start and end timestamps directly via SQL."""
+    conn = _connect_sqlite()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, producto, monto, sold_at
+            FROM sales
+            WHERE substr(sold_at, 1, 16) >= ? AND substr(sold_at, 1, 16) <= ?
+            ORDER BY sold_at ASC
+            """,
+            (start_time_str[:16], end_time_str[:16]),
+        )
+        rows = cur.fetchall()
+        result = []
+        for r in rows:
+            st = str(r["sold_at"]) if r["sold_at"] else ""
+            hora = st[11:16] if len(st) >= 16 else ""
+            fecha = st[:10] if len(st) >= 10 else ""
+            result.append({
+                "id": r["id"],
+                "producto": r["producto"],
+                "monto": float(r["monto"]),
+                "sold_at": st,
+                "hora": hora,
+                "fecha": fecha,
+            })
+        return result
+    finally:
+        conn.close()
+
+
+def load_access_log_between(start_time_str: str, end_time_str: str) -> List[Dict[str, Any]]:
+    """Load access logs between start and end timestamps directly via SQL."""
+    conn = _connect_sqlite()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, cedula, nombre, plan, status, event_time
+            FROM access_log
+            WHERE substr(event_time, 1, 16) >= ? AND substr(event_time, 1, 16) <= ?
+            ORDER BY event_time ASC
+            """,
+            (start_time_str[:16], end_time_str[:16]),
+        )
+        rows = cur.fetchall()
+        result = []
+        for r in rows:
+            et = str(r["event_time"]) if r["event_time"] else ""
+            hora = et[11:16] if len(et) >= 16 else ""
+            fecha = et[:10] if len(et) >= 10 else ""
+            result.append({
+                "id": r["id"],
+                "cedula": r["cedula"],
+                "nombre": r["nombre"] if "nombre" in r.keys() else "",
+                "plan": r["plan"] if "plan" in r.keys() else "",
+                "status": r["status"] if "status" in r.keys() else "",
+                "event_time": et,
+                "hora": hora,
+                "fecha": fecha,
+            })
+        return result
+    finally:
+        conn.close()
 
 
 def load_plans(active_only: bool = True) -> List[Dict[str, Any]]:
@@ -1153,12 +1962,34 @@ def import_backup_json(source: Any) -> Dict[str, Any]:
 
     data: Any = None
     if isinstance(source, str):
-        if os.path.isfile(source):
-            with open(source, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        clean_src = source.strip()
+        if clean_src.startswith("{") or clean_src.startswith("["):
+            data = json.loads(clean_src)
         else:
-            data = json.loads(source)
-    elif isinstance(source, dict) or isinstance(source, list):
+            from core.paths import get_app_dir, get_backups_dir
+
+            app_dir = os.path.realpath(get_app_dir())
+            backups_dir = os.path.realpath(get_backups_dir())
+
+            if not os.path.isabs(clean_src):
+                candidate = os.path.realpath(os.path.join(backups_dir, clean_src))
+                if not os.path.isfile(candidate):
+                    candidate = os.path.realpath(os.path.join(app_dir, clean_src))
+            else:
+                candidate = os.path.realpath(clean_src)
+
+            if not os.path.isfile(candidate):
+                raise FileNotFoundError(f"Archivo de respaldo no encontrado: {os.path.basename(clean_src)}")
+
+            if not (candidate.startswith(backups_dir) or candidate.startswith(app_dir)):
+                raise PermissionError("Acceso denegado: solo se permite importar archivos desde el directorio de respaldos.")
+
+            if not candidate.lower().endswith(".json"):
+                raise ValueError("Formato de archivo no admitido: debe ser un archivo .json")
+
+            with open(candidate, "r", encoding="utf-8") as f:
+                data = json.load(f)
+    elif isinstance(source, (dict, list)):
         data = source
     else:
         raise ValueError("Fuente de importación inválida")
@@ -1307,3 +2138,130 @@ def get_db_health() -> Dict[str, Any]:
         "connected": True,
         "path": _get_sqlite_path(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Functions added for complete parity with Sistema final release
+# ---------------------------------------------------------------------------
+
+def authenticate_user(username: str, password: str) -> Optional[dict]:
+    from core import local_db
+    return local_db.authenticate_user(username, password)
+
+
+def get_user_permissions(username: str) -> set:
+    from core import local_db
+    return local_db.get_user_permissions(username)
+
+
+def list_roles() -> List[str]:
+    from core import local_db
+    return local_db.list_roles()
+
+
+def list_users() -> List[dict]:
+    from core import local_db
+    return local_db.list_users()
+
+
+def create_user(username: str, password: str, role: str) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.create_user(username, password, role)
+
+
+def update_user(username: str, role: str, password: Optional[str] = None) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.update_user(username, role, password)
+
+
+def set_user_active(username: str, is_active: bool) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.set_user_active(username, is_active)
+
+
+def delete_user(username: str) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.delete_user(username)
+
+
+def load_pos_products(active_only: bool = False) -> List[dict]:
+    from core import local_db
+    return local_db.load_pos_products(active_only)
+
+
+def save_pos_product(product: dict) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.save_pos_product(product)
+
+
+def rename_pos_product(old_nombre: str, product: dict) -> Tuple[bool, str]:
+    from core import local_db
+    ok, msg = local_db.rename_pos_product(old_nombre, product)
+    try:
+        rename_product(old_nombre, product)
+    except Exception:
+        pass
+    return ok, msg
+
+
+def delete_pos_product(nombre: str) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.delete_pos_product(nombre)
+
+
+def set_product_active(nombre: str, is_active: bool) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.set_product_active(nombre, is_active)
+
+
+def decrement_stock_product(nombre: str, qty: int = 1) -> bool:
+    from core import local_db
+    return local_db.decrement_stock(nombre, qty)
+
+
+def set_plan_active(nombre: str, is_active: bool) -> Tuple[bool, str]:
+    from core import local_db
+    return local_db.set_plan_active(nombre, is_active)
+
+
+def save_audit_log(log_entry: dict) -> bool:
+    from core import local_db
+    return local_db.save_audit_log(log_entry)
+
+
+def load_audit_logs(
+    limit: int = 100,
+    action_filter: Optional[str] = None,
+    user_filter: Optional[str] = None,
+    query_search: Optional[str] = None,
+) -> List[dict]:
+    from core import local_db
+    return local_db.load_audit_logs(limit, action_filter, user_filter, query_search)
+
+
+def load_audit_actions() -> List[str]:
+    from core import local_db
+    return local_db.load_audit_actions()
+
+
+def load_audit_users() -> List[str]:
+    from core import local_db
+    return local_db.load_audit_users()
+
+
+def get_last_checkin(cedula: str) -> Optional[dict]:
+    from core import local_db
+    return local_db.get_last_checkin(cedula)
+
+
+def get_last_checkins_for_cedulas(cedulas: List[str]) -> Dict[str, dict]:
+    from core import local_db
+    return local_db.get_last_checkins_for_cedulas(cedulas)
+
+
+def list_members_low_attendance(
+    min_days: int = 7, estados: Tuple[str, ...] = ("Activo", "Vigente")
+) -> List[dict]:
+    from core import local_db
+    return local_db.list_members_low_attendance(min_days, estados)
+

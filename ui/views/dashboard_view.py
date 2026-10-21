@@ -15,7 +15,8 @@ from core.mock_data import MEMBERS, WEEKLY_ATTENDANCE
 from core.business import get_dashboard_metrics
 from core.bcv_service import bcv_service
 from core.event_bus import event_bus
-from ui.components.widgets import MetricCard, BarChartSim
+from ui.components.widgets import MetricCard, BarChartSim, HourlyPeakChart
+from core.whatsapp_service import get_whatsapp_url
 
 
 class DashboardView(ft.Column):
@@ -62,9 +63,12 @@ class DashboardView(ft.Column):
         self.txt_tasa_bcv = ft.Text("0.00 Bs/$", size=FONT_SIZE_MD, color=ACCENT_PRIMARY, weight="w600")
         self.txt_ingreso_bs = ft.Text("Bs. 0.00", size=13, color=ACCENT_PRIMARY, weight="w600")
 
-        # 3. Dynamic alert list containers
+        # 3. Dynamic alert and analytics containers
         self.morosos_container = ft.Container(expand=True, **card_style())
         self.proximos_container = ft.Container(expand=True, **card_style())
+        self.habitual_members_container = ft.Container(expand=True, **card_style())
+        self._current_habit_shift = "all"
+        self._last_habits = {}
 
         # Header with live refresh button
         self.header_row = ft.Row(
@@ -101,6 +105,9 @@ class DashboardView(ft.Column):
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         )
 
+        self.chart_asistencia = BarChartSim(WEEKLY_ATTENDANCE)
+        self.chart_horas_pico = HourlyPeakChart()
+
         # Assemble main view structure
         self.controls = [
             self.header_row,
@@ -117,7 +124,7 @@ class DashboardView(ft.Column):
             ft.Container(height=8),
             ft.Row(
                 controls=[
-                    BarChartSim(WEEKLY_ATTENDANCE),
+                    self.chart_asistencia,
                     ft.Container(
                         content=ft.Column(
                             controls=[
@@ -138,6 +145,14 @@ class DashboardView(ft.Column):
                         expand=True,
                         **card_style(),
                     ),
+                ],
+                spacing=16,
+            ),
+            ft.Container(height=8),
+            ft.Row(
+                controls=[
+                    self.chart_horas_pico,
+                    self.habitual_members_container,
                 ],
                 spacing=16,
             ),
@@ -196,6 +211,22 @@ class DashboardView(ft.Column):
         self.card_morosos.value = str(len(morosos))
         self.card_ingresos.value = f"${daily_income:.2f}"
 
+        # Update Weekly Attendance Chart (De-duplicated unique members)
+        weekly_data = metrics.get("weekly_attendance")
+        if weekly_data and hasattr(self, "chart_asistencia"):
+            self.chart_asistencia.set_data(weekly_data)
+
+        # Update Hourly Peak / Traffic Chart
+        hourly_traffic = metrics.get("hourly_traffic", {})
+        if hasattr(self, "chart_horas_pico"):
+            self.chart_horas_pico.set_data(hourly_traffic)
+
+        # Update Habitual Members breakdown
+        self._last_habits = metrics.get("member_habits", {})
+        self.habitual_members_container.content = self._build_habitual_members(
+            self._last_habits, self._current_habit_shift
+        )
+
         # Update Summary Table
         self.txt_total_miembros.value = str(metrics["total_members"])
         self.txt_ocupacion.value = metrics["ocupacion"]
@@ -208,9 +239,161 @@ class DashboardView(ft.Column):
         self.txt_tasa_bcv.value = f"{bcv_rate:.2f} Bs/$"
         self.txt_ingreso_bs.value = f"Bs. {daily_income_bs:,.2f}"
 
-        # Rebuild alert list containers
+        # Rebuild alert list containers with WhatsApp contact buttons
         self.morosos_container.content = self._build_alert_list("Morosos", morosos, ACCENT_DANGER)
         self.proximos_container.content = self._build_alert_list("Próximos a Vencer", proximos_vencer, ACCENT_WARNING)
+
+    def _change_habit_shift(self, shift_key: str):
+        self._current_habit_shift = shift_key
+        self.habitual_members_container.content = self._build_habitual_members(
+            self._last_habits, self._current_habit_shift
+        )
+        try:
+            self.habitual_members_container.update()
+        except Exception:
+            pass
+
+    def _build_habitual_members(self, habits_dict: dict, current_shift: str) -> ft.Control:
+        shift_key_map = {
+            "all": "all",
+            "morning": "morning",
+            "afternoon": "afternoon",
+            "evening": "evening",
+        }
+        members_list = habits_dict.get(shift_key_map.get(current_shift, "all"), [])
+
+        # Filter buttons
+        filter_configs = [
+            ("all", "Todos"),
+            ("morning", "Mañana (6-12)"),
+            ("afternoon", "Tarde (12-17)"),
+            ("evening", "Noche (17-22)"),
+        ]
+        filter_buttons = []
+        for key, lbl in filter_configs:
+            is_active = (key == current_shift)
+            filter_buttons.append(
+                ft.Container(
+                    content=ft.Text(
+                        lbl,
+                        size=11,
+                        color=TEXT_PRIMARY if is_active else TEXT_MUTED,
+                        weight="w600" if is_active else "w400",
+                    ),
+                    bgcolor=ACCENT_PRIMARY if is_active else BG_INPUT,
+                    padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                    border_radius=RADIUS_SM,
+                    ink=True,
+                    on_click=lambda e, k=key: self._change_habit_shift(k),
+                )
+            )
+
+        rows = []
+        for m in members_list[:6]:
+            phone_str = m.get("telefono", "")
+            wa_url = get_whatsapp_url(m) if phone_str else None
+
+            member_row_controls = [
+                ft.Icon(ft.Icons.PERSON_PIN_ROUNDED, size=18, color=ACCENT_PRIMARY),
+                ft.Column(
+                    controls=[
+                        ft.Text(m.get("nombre", ""), size=13, weight="w600", color=TEXT_PRIMARY),
+                        ft.Text(
+                            f"Plan: {m.get('plan', '-')} · C.I. {m.get('cedula', '')}",
+                            size=10,
+                            color=TEXT_MUTED,
+                        ),
+                    ],
+                    spacing=1,
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Text(f"🕒 {m.get('habitual_time', '')}", size=11, color=ACCENT_PRIMARY, weight="w600"),
+                    bgcolor=BG_INPUT,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                    border_radius=RADIUS_SM,
+                ),
+                ft.Container(
+                    content=ft.Text(
+                        f"{m.get('total_visits', 1)} visita{'s' if m.get('total_visits', 1) != 1 else ''}",
+                        size=11,
+                        color=ACCENT_SUCCESS,
+                        weight="w600",
+                    ),
+                    bgcolor=ft.Colors.with_opacity(0.12, ACCENT_SUCCESS),
+                    padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                    border_radius=RADIUS_SM,
+                ),
+            ]
+
+            if wa_url:
+                member_row_controls.append(
+                    ft.IconButton(
+                        icon=ft.Icons.CHAT,
+                        icon_size=16,
+                        icon_color="#25D366",
+                        tooltip=f"WhatsApp ({phone_str})",
+                        url=wa_url,
+                        on_click=lambda e, mem=m: self._launch_whatsapp(mem),
+                    )
+                )
+
+            rows.append(
+                ft.Container(
+                    content=ft.Row(
+                        controls=member_row_controls,
+                        alignment=ft.MainAxisAlignment.START,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=ft.padding.symmetric(vertical=4),
+                )
+            )
+
+        if not rows:
+            content_list = ft.Container(
+                content=ft.Row(
+                    controls=[
+                        ft.Icon(ft.Icons.INFO_OUTLINE, size=16, color=TEXT_MUTED),
+                        ft.Text("Sin asistencias registradas en este turno", size=12, color=TEXT_MUTED),
+                    ],
+                    spacing=8,
+                ),
+                padding=ft.padding.symmetric(vertical=12),
+            )
+        else:
+            content_list = ft.Column(controls=rows, spacing=4)
+
+        return ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.Row(
+                            controls=[
+                                ft.Icon(ft.Icons.GROUPS_OUTLINED, size=18, color=ACCENT_PRIMARY),
+                                heading_text("Socios Habituales por Horario", size=FONT_SIZE_MD),
+                            ],
+                            spacing=8,
+                        ),
+                        ft.Container(
+                            content=ft.Text(f"{len(members_list)} socios", size=11, color=ACCENT_PRIMARY, weight="w600"),
+                            bgcolor=ft.Colors.with_opacity(0.12, ACCENT_PRIMARY),
+                            padding=ft.padding.symmetric(horizontal=8, vertical=2),
+                            border_radius=12,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Text(
+                    "Mide a qué horas van normalmente y quiénes son los más asiduos",
+                    size=11,
+                    color=TEXT_MUTED,
+                ),
+                ft.Row(controls=filter_buttons, spacing=6, wrap=True),
+                ft.Container(height=1, bgcolor=BORDER, margin=ft.margin.only(top=2, bottom=4)),
+                content_list,
+            ],
+            spacing=6,
+        )
 
     def _build_alert_list(self, title: str, members: list, color: str) -> ft.Control:
         if not members:
@@ -233,19 +416,49 @@ class DashboardView(ft.Column):
 
         rows = []
         for m in members[:6]:
+            phone_str = m.get("telefono", "")
+            wa_url = get_whatsapp_url(m) if phone_str else None
+
+            row_controls = [
+                ft.Icon(ft.Icons.PERSON, size=16, color=color),
+                ft.Column(
+                    controls=[
+                        ft.Text(m.get("nombre", ""), color=TEXT_PRIMARY, size=13, weight="w600"),
+                        ft.Text(
+                            f"📞 {phone_str}" if phone_str else "Sin teléfono",
+                            size=10,
+                            color=TEXT_MUTED,
+                        ),
+                    ],
+                    spacing=1,
+                    expand=True,
+                ),
+                ft.Container(
+                    content=ft.Text(f"Vence: {m.get('vencimiento', '')}", size=11, color=color, weight="w500"),
+                    bgcolor=BG_INPUT,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=3),
+                    border_radius=RADIUS_SM,
+                ),
+            ]
+
+            if wa_url:
+                row_controls.append(
+                    ft.IconButton(
+                        icon=ft.Icons.CHAT,
+                        icon_size=16,
+                        icon_color="#25D366",
+                        tooltip=f"Enviar recordatorio por WhatsApp ({phone_str})",
+                        url=wa_url,
+                        on_click=lambda e, mem=m: self._launch_whatsapp(mem),
+                    )
+                )
+
             rows.append(
                 ft.Container(
                     content=ft.Row(
-                        controls=[
-                            ft.Icon(ft.Icons.PERSON, size=16, color=color),
-                            ft.Text(m.get("nombre", ""), color=TEXT_PRIMARY, size=13, weight="w600", expand=True),
-                            ft.Container(
-                                content=ft.Text(f"Vence: {m.get('vencimiento', '')}", size=11, color=color, weight="w500"),
-                                bgcolor=BG_INPUT,
-                                padding=ft.padding.symmetric(horizontal=8, vertical=3),
-                                border_radius=RADIUS_SM,
-                            ),
-                        ],
+                        controls=row_controls,
+                        alignment=ft.MainAxisAlignment.START,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     padding=ft.padding.symmetric(vertical=4),
                 )
@@ -270,6 +483,16 @@ class DashboardView(ft.Column):
             ],
             spacing=4,
         )
+
+    def _launch_whatsapp(self, member: dict):
+        """Open WhatsApp web / mobile link with pre-filled renewal reminder message."""
+        url = get_whatsapp_url(member)
+        if url and hasattr(self, "page") and self.page:
+            try:
+                if hasattr(self.page, "launch_url"):
+                    self.page.launch_url(url, web_popup_window_name="_blank")
+            except Exception as ex:
+                print(f"[DashboardView] Error launching WhatsApp: {ex}")
 
     def _summary_row(self, label: str, value_control: ft.Control):
         return ft.Row(

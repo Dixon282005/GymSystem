@@ -18,6 +18,12 @@ if hasattr(ft, "Padding"):
         if hasattr(ft.Padding, attr) and not hasattr(ft.padding, attr):
             setattr(ft.padding, attr, getattr(ft.Padding, attr))
 
+if hasattr(ft, "BorderRadius"):
+    for attr in ("all", "only", "symmetric", "horizontal", "vertical"):
+        if hasattr(ft.BorderRadius, attr) and not hasattr(ft.border_radius, attr):
+            setattr(ft.border_radius, attr, getattr(ft.BorderRadius, attr))
+
+
 if hasattr(ft, "Alignment"):
     for attr in ("CENTER", "TOP_LEFT", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT", "CENTER_LEFT", "CENTER_RIGHT"):
         if hasattr(ft.Alignment, attr):
@@ -120,9 +126,12 @@ def input_style():
     }
 
 
+ButtonControl = getattr(ft, "Button", ft.ElevatedButton)
+
+
 def button_primary(text, on_click=None, width=None, icon=None, **kwargs):
     """Primary button factory supporting optional icon."""
-    from flet import ElevatedButton, Text, Row, Icon
+    from flet import Text, Row, Icon
     if icon:
         content = Row(
             controls=[
@@ -136,7 +145,7 @@ def button_primary(text, on_click=None, width=None, icon=None, **kwargs):
     else:
         content = Text(text, size=FONT_SIZE_SM, weight="w600", color=TEXT_PRIMARY)
 
-    btn = ElevatedButton(
+    btn = ButtonControl(
         content=content,
         bgcolor=ACCENT_PRIMARY,
         color=TEXT_PRIMARY,
@@ -153,7 +162,7 @@ def button_primary(text, on_click=None, width=None, icon=None, **kwargs):
 
 def button_danger(text, on_click=None, width=None, icon=None, **kwargs):
     """Danger/accent button factory supporting optional icon."""
-    from flet import ElevatedButton, Text, Row, Icon
+    from flet import Text, Row, Icon
     if icon:
         content = Row(
             controls=[
@@ -167,7 +176,7 @@ def button_danger(text, on_click=None, width=None, icon=None, **kwargs):
     else:
         content = Text(text, size=FONT_SIZE_SM, weight="w600", color=TEXT_PRIMARY)
 
-    btn = ElevatedButton(
+    btn = ButtonControl(
         content=content,
         bgcolor=ACCENT_DANGER,
         color=TEXT_PRIMARY,
@@ -184,7 +193,7 @@ def button_danger(text, on_click=None, width=None, icon=None, **kwargs):
 
 def button_outline(text, on_click=None, width=None, icon=None, **kwargs):
     """Outline/ghost button factory supporting optional icon."""
-    from flet import ElevatedButton, Text, Row, Icon
+    from flet import Text, Row, Icon
     if icon:
         content = Row(
             controls=[
@@ -198,7 +207,7 @@ def button_outline(text, on_click=None, width=None, icon=None, **kwargs):
     else:
         content = Text(text, size=FONT_SIZE_SM, weight="w500", color=TEXT_SECONDARY)
 
-    btn = ElevatedButton(
+    btn = ButtonControl(
         content=content,
         bgcolor="transparent",
         color=TEXT_SECONDARY,
@@ -224,3 +233,15 @@ def heading_text(text, size=FONT_SIZE_LG, color=TEXT_PRIMARY, weight="w700"):
     """Reusable heading text."""
     from flet import Text
     return Text(text, size=size, color=color, weight=weight)
+
+
+def BCVRateChip(rate: float, updated: str = ""):
+    from ui.components.widgets import BCVRateChip as _Chip
+    return _Chip(rate=rate, updated=updated)
+
+
+def show_snack(page, msg: str, color=None):
+    from ui.components.widgets import show_snack as _show_snack
+    return _show_snack(page, msg, color)
+
+

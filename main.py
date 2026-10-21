@@ -1,6 +1,7 @@
-"""Gymsis — Entry point."""
-
 import os
+import signal
+import sys
+import atexit
 import traceback
 
 import flet as ft
@@ -8,6 +9,21 @@ import core.theme  # Apply cross-version Flet shims early
 from app import GymsisApp
 from core.db_store import bootstrap_database, hydrate_mock_data_from_db
 from core.env_loader import load_env_file
+
+
+def _on_system_exit():
+    try:
+        from core.db_store import _connect_sqlite, get_active_engine
+        if get_active_engine() == "sqlite":
+            conn = _connect_sqlite()
+            conn.execute("PRAGMA wal_checkpoint(FULL);")
+            conn.close()
+        print("[Gymsis] Estado de base de datos sincronizado correctamente al salir.")
+    except Exception as ex:
+        print(f"[Gymsis] Aviso al cerrar: {ex}")
+
+
+atexit.register(_on_system_exit)
 
 
 def main(page: ft.Page):
@@ -38,27 +54,51 @@ def main(page: ft.Page):
         page.update()
 
 
+def _kill_conflicting_processes(port: int = 8550):
+    try:
+        import subprocess
+        if sys.platform == "win32":
+            cmd = f'netstat -ano | findstr ":{port}"'
+            try:
+                out = subprocess.check_output(cmd, shell=True).decode("utf-8", errors="ignore")
+                for line in out.strip().splitlines():
+                    parts = line.split()
+                    if len(parts) >= 5 and f":{port}" in parts[1]:
+                        pid = parts[-1]
+                        if pid.isdigit() and int(pid) != os.getpid():
+                            subprocess.run(f"taskkill /F /PID {pid}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        else:
+            try:
+                subprocess.run(["fuser", "-k", f"{port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     load_env_file()
-    run_mode = os.getenv("GYMSIS_RUN_MODE", "auto").lower()
+    run_mode = os.getenv("GYMSIS_RUN_MODE", "desktop").lower()
 
     if run_mode in ("desktop", "auto"):
         try:
             import flet_desktop  # noqa: F401
             run_mode = "desktop"
         except ImportError:
+            print("[Gymsis] flet-desktop no disponible, iniciando en modo navegador...")
             run_mode = "web"
 
     if run_mode == "web":
         host = os.getenv("GYMSIS_HOST", "0.0.0.0")
         port = int(os.getenv("GYMSIS_PORT", "8550"))
-        renderer_name = os.getenv("GYMSIS_WEB_RENDERER", "canvaskit").lower()
+        _kill_conflicting_processes(port)
+        renderer_name = os.getenv("GYMSIS_WEB_RENDERER", "auto").lower()
         if renderer_name in ("canvaskit", "canvas_kit"):
             web_renderer = ft.WebRenderer.CANVAS_KIT
         elif renderer_name == "skwasm":
             web_renderer = ft.WebRenderer.SKWASM
-        elif renderer_name == "auto":
-            web_renderer = ft.WebRenderer.AUTO
         else:
             web_renderer = ft.WebRenderer.AUTO
 
@@ -71,5 +111,6 @@ if __name__ == "__main__":
             web_renderer=web_renderer,
         )
     else:
+        print("[Gymsis] Iniciando Gymsis como aplicacion de escritorio nativa...")
         ft.run(main)
 
