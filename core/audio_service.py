@@ -70,35 +70,59 @@ class AudioService:
         if not cleaned:
             return
 
-        # 1. Try High-Definition Neural TTS (edge-tts with disk caching)
-        success = self._play_neural_tts(cleaned)
-        if success:
-            return
+        with self._lock:
+            # 1. Try High-Definition Neural TTS (edge-tts with disk caching)
+            success = self._play_neural_tts(cleaned)
+            if success:
+                return
 
-        # 2. Fallback to local system Speech Dispatcher with Latin American Spanish
-        if self._spd_say:
-            try:
-                res = subprocess.run(
-                    [
-                        self._spd_say,
-                        "-l", "es-419",
-                        "-t", "female1",
-                        "-r", "0",
-                        "-p", "5",
-                        "-i", "100",
-                        cleaned,
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                    timeout=5,
-                )
-                if res.returncode == 0:
+            # 2. On Windows, fallback to native offline SAPI voice (zero internet needed)
+            if os.name == "nt":
+                if self._play_windows_sapi(cleaned):
                     return
-            except Exception:
-                pass
 
-        print(f"[AUDIO]: {cleaned}")
+            # 3. Fallback to local Linux system Speech Dispatcher
+            if self._spd_say:
+                try:
+                    res = subprocess.run(
+                        [
+                            self._spd_say,
+                            "-l", "es-419",
+                            "-t", "female1",
+                            "-r", "0",
+                            "-p", "5",
+                            "-i", "100",
+                            cleaned,
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=5,
+                    )
+                    if res.returncode == 0:
+                        return
+                except Exception:
+                    pass
+
+            print(f"[AUDIO]: {cleaned}")
+
+    def _play_windows_sapi(self, text: str) -> bool:
+        """Native Windows Speech Synthesizer fallback for 100% offline announcement."""
+        try:
+            safe_text = text.replace("'", " ").replace('"', " ").strip()
+            if not safe_text:
+                return False
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"(New-Object -ComObject SAPI.SpVoice).Speak('{safe_text}')",
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
+            return True
+        except Exception:
+            return False
 
     def _play_neural_tts(self, text: str) -> bool:
         """Generate/Fetch cached MP3 and play via system audio player."""

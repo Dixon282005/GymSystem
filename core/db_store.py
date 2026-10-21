@@ -837,6 +837,7 @@ def delete_member(cedula: str) -> bool:
             try:
                 with conn:
                     with conn.cursor() as cur:
+                        cur.execute("DELETE FROM member_nfc_keys WHERE UPPER(cedula) = %s", (clean_cedula,))
                         cur.execute("DELETE FROM members WHERE cedula = %s", (clean_cedula,))
             except Exception:
                 pass
@@ -844,6 +845,7 @@ def delete_member(cedula: str) -> bool:
     conn = _connect_sqlite()
     try:
         with conn:
+            conn.execute("DELETE FROM member_nfc_keys WHERE UPPER(cedula) = ?", (clean_cedula,))
             conn.execute("DELETE FROM members WHERE cedula = ?", (clean_cedula,))
         return True
     finally:

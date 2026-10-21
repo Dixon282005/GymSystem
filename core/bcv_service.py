@@ -9,7 +9,7 @@ Zero dirty dependencies: built strictly on Python's standard library (urllib, ss
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import logging
 import re

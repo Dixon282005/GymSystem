@@ -70,6 +70,16 @@ if not hasattr(ft.Page, "open"):
 if not hasattr(ft.Page, "close"):
     setattr(ft.Page, "close", _page_close_shim)
 
+# Cross-version Control.page property safe getter (returns None instead of raising RuntimeError when unattached)
+if hasattr(ft, "Control") and hasattr(ft.Control, "page") and isinstance(getattr(ft.Control, "page", None), property):
+    _orig_control_page = ft.Control.page.fget
+    def _safe_control_page(self):
+        try:
+            return _orig_control_page(self)
+        except RuntimeError:
+            return None
+    ft.Control.page = property(_safe_control_page, ft.Control.page.fset, ft.Control.page.fdel)
+
 BG_BASE = "#020617"
 BG_CARD = "#0f172a"
 BG_INPUT = "#1e293b"

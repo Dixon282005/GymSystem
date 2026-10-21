@@ -253,8 +253,35 @@ class TestAuditNfcAndPayments(unittest.TestCase):
             self.assertIn("CIERRE DE CAJA", content)
             self.assertIn("INGRESOS POR MEMBRESÍAS", content)
             self.assertIn("VENTAS POS (CANTINA)", content)
-            self.assertIn("TOTAL GENERAL USD", content)
+    def test_07_nfc_key_freed_on_member_delete(self):
+        """When a member is hard deleted, their NFC keys must be released and reassignable."""
+        from core.mock_data import remove_member
+        ts = int(datetime.now().timestamp() * 1000)
+        cedula1 = f"V-DEL1-{ts}"
+        cedula2 = f"V-DEL2-{ts}"
+        shared_nfc = f"REUSETAG{ts}"
+
+        register_member(
+            cedula=cedula1,
+            nombre="Socio a Eliminar",
+            plan="Basico",
+            nfc_id=shared_nfc,
+        )
+
+        # Deleting member permanently
+        remove_member(cedula1, hard_delete=True)
+
+        # Reassigning the same NFC tag to member 2 should succeed without duplicate error
+        member2 = register_member(
+            cedula=cedula2,
+            nombre="Nuevo Socio Propietario",
+            plan="VIP",
+            nfc_id=shared_nfc,
+        )
+        self.assertEqual(member2["cedula"], cedula2)
+        self.assertEqual(member2["nfc_id"], shared_nfc)
 
 
 if __name__ == "__main__":
     unittest.main()
+

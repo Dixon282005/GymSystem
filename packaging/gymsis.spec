@@ -2,6 +2,7 @@
 
 import os
 import sys
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
@@ -10,18 +11,35 @@ ROOT_DIR = os.path.abspath(SPECPATH)
 if not os.path.exists(os.path.join(ROOT_DIR, 'main.py')):
     ROOT_DIR = os.path.abspath(os.path.join(SPECPATH, '..'))
 
+# Ensure data directory exists
+data_dir = os.path.join(ROOT_DIR, 'data')
+if not os.path.exists(data_dir):
+    os.makedirs(data_dir, exist_ok=True)
+
 added_files = [
     (os.path.join(ROOT_DIR, 'db'), 'db'),
     (os.path.join(ROOT_DIR, 'data'), 'data'),
     (os.path.join(ROOT_DIR, '.env.example'), '.'),
 ]
 
-if os.path.exists(os.path.join(ROOT_DIR, '.cache')):
-    added_files.append((os.path.join(ROOT_DIR, '.cache'), '.cache'))
+# Collect package data files (critical for Flet icons.json, Flutter runtime binaries, etc.)
+for pkg in ['flet', 'flet_desktop', 'fastapi', 'starlette', 'uvicorn', 'edge_tts', 'psycopg']:
+    try:
+        added_files.extend(collect_data_files(pkg))
+    except Exception as e:
+        print(f"Warning: collect_data_files for {pkg}: {e}")
 
-# Ensure data directory exists
-if not os.path.exists(os.path.join(ROOT_DIR, 'data')):
-    os.makedirs(os.path.join(ROOT_DIR, 'data'), exist_ok=True)
+# Deduplicate added_files by (normpath(src), dst)
+seen = set()
+unique_added_files = []
+for src, dst in added_files:
+    if os.path.exists(src):
+        key = (os.path.normpath(src), dst)
+        if key not in seen:
+            seen.add(key)
+            unique_added_files.append((src, dst))
+
+added_files = unique_added_files
 
 hidden_imports = [
     'flet',
@@ -31,11 +49,14 @@ hidden_imports = [
     'starlette',
     'uvicorn',
     'psycopg',
+    'psycopg_binary',
     'openpyxl',
     'dotenv',
     'sqlite3',
     'urllib.parse',
     'datetime',
+    'edge_tts',
+    'aiohttp',
     'core',
     'ui',
     'core.theme',
@@ -50,7 +71,27 @@ hidden_imports = [
     'core.reports_export',
     'core.repositories',
     'core.whatsapp_service',
+    'ui.views.access_view',
+    'ui.views.audit_logs_view',
+    'ui.views.dashboard_view',
+    'ui.views.kiosk_view',
+    'ui.views.login_view',
+    'ui.views.members_view',
+    'ui.views.plans_view',
+    'ui.views.pos_view',
+    'ui.views.products_view',
+    'ui.views.reports_view',
+    'ui.views.settings_view',
 ]
+
+try:
+    for mod in collect_submodules('flet'):
+        if not mod.startswith('flet.testing'):
+            hidden_imports.append(mod)
+except Exception:
+    pass
+
+hidden_imports = list(dict.fromkeys(hidden_imports))
 
 a = Analysis(
     [os.path.join(ROOT_DIR, 'main.py')],
@@ -61,7 +102,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter'],
+    excludes=['tkinter', 'flet.testing'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -81,10 +122,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -92,3 +133,4 @@ exe = EXE(
     entitlements_file=None,
     icon=None,
 )
+

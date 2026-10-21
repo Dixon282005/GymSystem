@@ -177,8 +177,11 @@ class WinSCardDriver:
                     if sys.platform == "win32":
                         try:
                             import subprocess
+                            subprocess.run("sc.exe start SCardSvr", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             subprocess.run("net start SCardSvr", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_USER, None, None, ctypes.byref(self._hContext))
+                            if ret != 0:
+                                ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_SYSTEM, None, None, ctypes.byref(self._hContext))
                         except Exception:
                             pass
                 if ret != 0:
@@ -188,7 +191,11 @@ class WinSCardDriver:
             readers_len = DWORD(0)
             ret = self._winscard.SCardListReadersA(self._hContext, None, None, ctypes.byref(readers_len))
             if ret != 0 or readers_len.value == 0:
-                self.is_connected = False
+                # If service stopped or context invalidated, reset context
+                if ret in (0x8010001E, 0x8010001D, -2146435042, -2146435043):
+                    self.close()
+                else:
+                    self.is_connected = False
                 return False
 
             buf = ctypes.create_string_buffer(readers_len.value)
@@ -230,7 +237,7 @@ class WinSCardDriver:
             return True
         except Exception as e:
             logger.debug(f"[NFC] Excepción en connect_reader: {e}")
-            self.is_connected = False
+            self.close()
             return False
 
     def poll_card(self) -> Optional[bytes]:
@@ -592,17 +599,8 @@ class NfcService:
 
                     time.sleep(0.08)
                     continue
-                else:
-                    if last_state is not False:
-                        last_state = False
-                        self.is_connected = False
-                        self._notify_status(False, "Lector NFC desconectado")
-
-                    time.sleep(1.0)
-                    continue
-
-            # 2. On Linux / Cross-platform, use PyUSB backend
-            if sys.platform != "win32" and USB_AVAILABLE:
+            # 2. PyUSB backend (Linux, or Windows if WinSCard reader not active)
+            if not self._win_driver.is_connected and USB_AVAILABLE:
                 if not self._device:
                     self._init_device()
 

@@ -310,6 +310,7 @@ def remove_member(cedula: str, hard_delete: bool = False) -> bool:
 
     nombre = member.get("nombre", "")
     MEMBERS[:] = [m for m in MEMBERS if normalize_cedula(m["cedula"]) != normalized]
+    MEMBER_NFC_KEYS[:] = [k for k in MEMBER_NFC_KEYS if normalize_cedula(k.get("cedula", "")) != normalized]
     if normalized in MEMBER_BY_CEDULA:
         del MEMBER_BY_CEDULA[normalized]
 

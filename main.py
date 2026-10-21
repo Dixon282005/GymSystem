@@ -79,6 +79,12 @@ def _kill_conflicting_processes(port: int = 8550):
 
 
 if __name__ == "__main__":
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable)))
+        bundled_app = os.path.join(meipass, "flet_desktop", "app")
+        if os.path.exists(os.path.join(bundled_app, "flet.exe")):
+            os.environ["FLET_VIEW_PATH"] = bundled_app
+
     load_env_file()
     run_mode = os.getenv("GYMSIS_RUN_MODE", "desktop").lower()
 

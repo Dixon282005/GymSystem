@@ -39,12 +39,7 @@ from core.cash_closure import run_pending_daily_closures
 
 
 
-_SERVER_SESSION = {
-    "authenticated": False,
-    "user": None,
-    "active_view": "dashboard",
-    "route": "/admin",
-}
+
 
 
 _ALL_VIEWS_CONFIG = [
@@ -139,10 +134,19 @@ class GymsisApp:
     def _configure_page(self):
         self.page.title = "Gymsis • Control de Acceso"
         self.page.bgcolor = BG_BASE
-        self.page.window_width = 1280
-        self.page.window_height = 800
-        self.page.window_min_width = 900
-        self.page.window_min_height = 600
+        try:
+            self.page.window.width = 1280
+            self.page.window.height = 800
+            self.page.window.min_width = 900
+            self.page.window.min_height = 600
+        except Exception:
+            try:
+                self.page.window_width = 1280
+                self.page.window_height = 800
+                self.page.window_min_width = 900
+                self.page.window_min_height = 600
+            except Exception:
+                pass
         self.page.theme_mode = ft.ThemeMode.DARK
         self.page.fonts = {"default": "Segoe UI, system-ui, sans-serif"}
 
@@ -175,15 +179,12 @@ class GymsisApp:
             self._show_kiosk_view()
             return
 
-        # Restore authenticated backoffice session (from token or server session)
         authenticated_user = None
         if session_token:
             from core.security import verify_session_token
             session_info = verify_session_token(session_token)
             if session_info:
                 authenticated_user = {"username": session_info["username"], "role": session_info.get("role", "admin")}
-        elif _SERVER_SESSION.get("authenticated") and _SERVER_SESSION.get("user"):
-            authenticated_user = _SERVER_SESSION["user"]
 
         if authenticated_user:
             from core.repositories import UserRepository
@@ -207,7 +208,7 @@ class GymsisApp:
             if not self.allowed_views:
                 self.allowed_views = [_ALL_VIEWS_CONFIG[0]]
 
-            target_view_id = saved_view or _SERVER_SESSION.get("active_view", "dashboard")
+            target_view_id = saved_view or "dashboard"
             view_idx = 0
             if target_view_id:
                 for idx, cfg in enumerate(self.allowed_views):
@@ -344,9 +345,6 @@ class GymsisApp:
             set_active_user(uname)
             log_action("INICIO_SESION", {"usuario": uname, "rol": role})
             self.is_admin_authenticated = True
-            _SERVER_SESSION["authenticated"] = True
-            _SERVER_SESSION["user"] = authenticated_user
-            _SERVER_SESSION["route"] = "/admin"
             self.page.route = "/admin"
 
             # Persist tamper-proof session token in client_storage
@@ -384,9 +382,6 @@ class GymsisApp:
         self.is_admin_authenticated = False
         self.current_user = None
         self.current_user_permissions.clear()
-        _SERVER_SESSION["authenticated"] = False
-        _SERVER_SESSION["user"] = None
-        _SERVER_SESSION["active_view"] = "dashboard"
         try:
             if hasattr(self.page, "client_storage") and self.page.client_storage:
                 self.page.client_storage.remove("gymsis_session_token")
@@ -594,7 +589,7 @@ class GymsisApp:
         # Persist active view ID in both server session and client_storage for page reloads
         if self.allowed_views and index < len(self.allowed_views):
             active_view_id = self.allowed_views[index]["id"]
-            _SERVER_SESSION["active_view"] = active_view_id
+            self.active_view_id = active_view_id
             try:
                 if hasattr(self.page, "client_storage") and self.page.client_storage:
                     self.page.client_storage.set("gymsis_active_view", active_view_id)

@@ -21,7 +21,7 @@ def get_reports_root() -> str:
 
 
 def get_db_path() -> str:
-    """Return local SQLite database path (checks app directory and data subfolder)."""
+    """Return local SQLite database path (checks app directory, data subfolder, and parent repo)."""
     if os.getenv("GYMSIS_SQLITE_PATH"):
         return os.getenv("GYMSIS_SQLITE_PATH")
     
@@ -30,12 +30,17 @@ def get_db_path() -> str:
     if os.path.exists(root_db):
         return root_db
         
-    data_dir = os.path.join(app_dir, "data")
-    data_db = os.path.join(data_dir, "gymsis.db")
+    data_db = os.path.join(app_dir, "data", "gymsis.db")
     if os.path.exists(data_db):
         return data_db
-        
-    return root_db
+
+    parent_data_db = os.path.join(os.path.dirname(app_dir), "data", "gymsis.db")
+    if os.path.exists(parent_data_db):
+        return parent_data_db
+
+    target_data = os.path.join(app_dir, "data")
+    os.makedirs(target_data, exist_ok=True)
+    return os.path.join(target_data, "gymsis.db")
 
 
 def get_backups_dir() -> str:
