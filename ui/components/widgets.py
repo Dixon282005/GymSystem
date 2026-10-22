@@ -27,19 +27,40 @@ def show_snack(page, msg: str, color=None):
 
 
 class MetricCard(ft.Container):
-    """Metric card with icon, value, label, and accent color."""
+    """Metric card with icon, value, label, and accent color.
+    Supports optional on_click handler for interactive drill-down modals.
+    """
 
-    def __init__(self, icon, icon_color, value, label, icon_data=None):
+    def __init__(self, icon, icon_color, value, label, icon_data=None, on_click=None):
         self.value_text = ft.Text(str(value), size=FONT_SIZE_XL, color=TEXT_PRIMARY, weight="w700")
         self.label_text = ft.Text(str(label), size=FONT_SIZE_SM, color=TEXT_SECONDARY, weight="w500")
+        
+        header_controls = [
+            ft.Icon(icon, color=icon_color, size=22),
+            ft.Container(expand=True),
+        ]
+        if on_click is not None:
+            header_controls.append(
+                ft.Row(
+                    controls=[
+                        ft.Text("Ver lista", size=10, color=TEXT_MUTED, weight="w500"),
+                        ft.Icon(ft.Icons.ARROW_FORWARD_IOS_ROUNDED, size=10, color=TEXT_MUTED),
+                    ],
+                    spacing=2,
+                )
+            )
+
+        card_kwargs = card_style()
+        if on_click is not None:
+            card_kwargs["ink"] = True
+            card_kwargs["on_click"] = on_click
+            card_kwargs["tooltip"] = f"Clic para ver lista de {label}"
+
         super().__init__(
             content=ft.Column(
                 controls=[
                     ft.Row(
-                        controls=[
-                            ft.Icon(icon, color=icon_color, size=22),
-                            ft.Container(expand=True),
-                        ],
+                        controls=header_controls,
                     ),
                     self.value_text,
                     self.label_text,
@@ -47,7 +68,7 @@ class MetricCard(ft.Container):
                 spacing=6,
             ),
             expand=True,
-            **card_style(),
+            **card_kwargs,
         )
 
     @property

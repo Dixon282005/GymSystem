@@ -225,26 +225,32 @@ class AccessView(ft.Column):
         from core.event_bus import event_bus
         event_bus.unsubscribe("access_scan", self._on_event_bus_scan)
         event_bus.unsubscribe("members_changed", self._on_event_bus_members_changed)
+        self.page = None
 
     def _on_event_bus_scan(self, result: dict):
+        if getattr(self, "page", None) is None:
+            return
         raw_id = result.get("event", {}).get("cedula", "")
         self._update_ui_with_scan_result(result, raw_id)
 
     def _on_event_bus_members_changed(self, member):
+        if getattr(self, "page", None) is None:
+            return
         self._refresh_present_list()
         self._refresh_counters()
-        if hasattr(self, "page") and self.page:
-            try:
-                self.present_column.update()
-                self.allowed_counter.update()
-                self.denied_counter.update()
-                self.events_counter.update()
-            except Exception:
-                pass
+        try:
+            self.present_column.update()
+            self.allowed_counter.update()
+            self.denied_counter.update()
+            self.events_counter.update()
+        except Exception:
+            pass
 
     def _on_nfc_scan(self, uid: str):
         """Dispatched from the background NFC worker thread when a tag is touched."""
-        process_nfc_scan(uid, min_interval=3.0)
+        result = process_nfc_scan(uid, min_interval=3.0)
+        if result:
+            self._update_ui_with_scan_result(result, uid)
 
     def _handle_manual_scan(self, e):
         raw_val = (self.sim_input.value or "").strip()
@@ -256,7 +262,9 @@ class AccessView(ft.Column):
         except Exception:
             pass
 
-        process_nfc_scan(raw_val)
+        result = process_nfc_scan(raw_val)
+        if result:
+            self._update_ui_with_scan_result(result, raw_val)
 
     def _update_ui_with_scan_result(self, result: dict, raw_input: str):
         action = result.get("action", "ENTRADA" if result.get("allowed") else "DENEGADO")
@@ -349,7 +357,7 @@ class AccessView(ft.Column):
         self._refresh_log_cards()
         self._refresh_counters()
 
-        if hasattr(self, "page") and self.page:
+        if getattr(self, "page", None) is not None:
             try:
                 self.latest_scan_banner.update()
                 self.present_column.update()

@@ -308,20 +308,26 @@ class POSView(ft.Column):
         event_bus.unsubscribe("sales_changed", self._on_sales_changed)
         event_bus.unsubscribe("bcv_updated", self._on_bcv_updated)
         event_bus.unsubscribe("pos_products_changed", self._on_pos_products_changed)
+        self.page = None
 
     def _on_pos_products_changed(self, data=None):
+        if getattr(self, "page", None) is None:
+            return
         self._refresh_product_list()
 
     def _on_sales_changed(self, data=None):
+        if getattr(self, "page", None) is None:
+            return
         self._refresh_product_list()
         self.sales_log.controls = self._build_sales_log()
-        if hasattr(self, "page") and self.page:
-            try:
-                self.sales_log.update()
-            except Exception:
-                pass
+        try:
+            self.sales_log.update()
+        except Exception:
+            pass
 
     def _on_bcv_updated(self, data=None):
+        if getattr(self, "page", None) is None:
+            return
         self._update_cart_totals()
 
     def _open_modal(self, dialog):
@@ -571,7 +577,7 @@ class POSView(ft.Column):
 
     def _build_sales_log(self):
         rows = []
-        for sale in DAILY_SALES:
+        for sale in reversed(DAILY_SALES):
             monto = float(sale.get("monto", 0))
             rows.append(
                 ft.Row(
@@ -648,27 +654,7 @@ class POSView(ft.Column):
             return
 
         total_sold = self.cart_total
-        total_bs = bcv_service.to_bs(total_sold)
-
-        for item in register_sale_rows(self.cart_items):
-            self.sales_log.controls.insert(
-                0,
-                ft.Row(
-                    controls=[
-                        ft.Column(
-                            controls=[
-                                ft.Text(item["producto"], size=FONT_SIZE_SM, color=TEXT_PRIMARY, weight="w500"),
-                                ft.Text(bcv_service.format_bs(bcv_service.to_bs(item["monto"])), size=11, color=TEXT_MUTED),
-                            ],
-                            spacing=1,
-                            expand=True,
-                        ),
-                        ft.Text(item["hora"], size=FONT_SIZE_XS, color=TEXT_MUTED),
-                        ft.Text(f"${item['monto']:.2f}", size=FONT_SIZE_SM, color=ACCENT_SUCCESS, weight="w600"),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-            )
+        register_sale_rows(self.cart_items)
 
         self.cart_items = []
         self.cart_total = 0.0

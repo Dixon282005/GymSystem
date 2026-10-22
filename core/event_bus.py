@@ -45,10 +45,16 @@ class EventBus:
         for cb in callbacks:
             try:
                 cb(data)
-            except Exception as e:
+            except BaseException as e:
                 err_msg = str(e).lower()
-                # If subscriber belonged to a destroyed/closed Flet page, prune it to prevent memory leaks
-                if "not added to" in err_msg or "destroyed" in err_msg or "closed" in err_msg:
+                # If subscriber belonged to a destroyed/closed/unmounted Flet page, prune it
+                if (
+                    "must be added to the page first" in err_msg
+                    or "not added to" in err_msg
+                    or "destroyed" in err_msg
+                    or "closed" in err_msg
+                    or "unmounted" in err_msg
+                ):
                     dead_callbacks.append(cb)
                 else:
                     logger.debug(f"[EventBus] Listener for '{event_type}' notice: {e}")

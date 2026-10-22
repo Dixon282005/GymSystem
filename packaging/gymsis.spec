@@ -63,6 +63,7 @@ hidden_imports = [
     'core.db_store',
     'core.mock_data',
     'core.business',
+    'core.event_bus',
     'core.paths',
     'core.security',
     'core.audio_service',

@@ -70,15 +70,36 @@ if not hasattr(ft.Page, "open"):
 if not hasattr(ft.Page, "close"):
     setattr(ft.Page, "close", _page_close_shim)
 
-# Cross-version Control.page property safe getter (returns None instead of raising RuntimeError when unattached)
+# Cross-version Control.page property safe getter and setter (returns None instead of raising RuntimeError when unattached)
 if hasattr(ft, "Control") and hasattr(ft.Control, "page") and isinstance(getattr(ft.Control, "page", None), property):
     _orig_control_page = ft.Control.page.fget
     def _safe_control_page(self):
+        if hasattr(self, "_custom_page"):
+            return self._custom_page
         try:
             return _orig_control_page(self)
         except RuntimeError:
             return None
-    ft.Control.page = property(_safe_control_page, ft.Control.page.fset, ft.Control.page.fdel)
+
+    def _safe_control_page_set(self, val):
+        self._custom_page = val
+
+    def _safe_control_page_del(self):
+        if hasattr(self, "_custom_page"):
+            del self._custom_page
+
+    ft.Control.page = property(_safe_control_page, _safe_control_page_set, _safe_control_page_del)
+
+try:
+    import fastapi
+    if hasattr(fastapi, "FastAPI") and hasattr(fastapi.FastAPI, "__init__"):
+        _orig_fastapi_init = fastapi.FastAPI.__init__
+        def _patched_fastapi_init(self, *args, **kwargs):
+            kwargs.pop("openapi_prefix", None)
+            return _orig_fastapi_init(self, *args, **kwargs)
+        fastapi.FastAPI.__init__ = _patched_fastapi_init
+except Exception:
+    pass
 
 BG_BASE = "#020617"
 BG_CARD = "#0f172a"

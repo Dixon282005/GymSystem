@@ -141,8 +141,7 @@ class MembersView(ft.Column):
         self.cedula_number = ft.TextField(
             label="Cédula",
             hint_text="Ej: 12345678",
-            keyboard_type=ft.KeyboardType.NUMBER,
-            input_filter=ft.NumbersOnlyInputFilter(),
+            input_filter=ft.InputFilter(allow=True, regex_string=r"^[0-9a-zA-Z\-]*$", replacement_string=""),
             expand=1,
             bgcolor=BG_INPUT,
             color=TEXT_PRIMARY,
@@ -239,6 +238,7 @@ class MembersView(ft.Column):
             border_radius=RADIUS_SM,
             text_size=14,
             expand=1,
+            on_change=self._on_new_nfc_change,
         )
         self.nfc_scan_status = ft.Text(
             "Opcional: Si el socio no tiene llavero, déjalo vacío o presiona el botón para escanear en ACR122U.",
@@ -319,8 +319,24 @@ class MembersView(ft.Column):
             border_radius=RADIUS_SM,
             text_size=14,
             expand=1,
+            on_change=self._on_edit_nfc_change,
         )
         self.edit_nfc_status = ft.Text("", size=11, color=TEXT_MUTED)
+        self.edit_member_error_text = ft.Text("", size=12, color=ACCENT_DANGER, weight="w600", expand=True)
+        self.edit_member_error_banner = ft.Container(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED, color=ACCENT_DANGER, size=20),
+                    self.edit_member_error_text,
+                ],
+                spacing=8,
+            ),
+            bgcolor=ft.Colors.with_opacity(0.12, ACCENT_DANGER),
+            border=ft.Border.all(1, ACCENT_DANGER),
+            border_radius=RADIUS_SM,
+            padding=ft.padding.symmetric(horizontal=12, vertical=8),
+            visible=False,
+        )
 
         # -------------------------------------------------------------------
         # Fields for PAYMENT & RENEWAL Dialog (Bimonetary at BCV Rate)
@@ -493,6 +509,7 @@ class MembersView(ft.Column):
             content=ft.Container(
                 content=ft.Column(
                     controls=[
+                        self.edit_member_error_banner,
                         self.edit_cedula_field,
                         self.edit_nombre_field,
                         self.edit_telefono_field,
@@ -810,6 +827,7 @@ class MembersView(ft.Column):
                 expand=True,
             ),
         ]
+        self.did_mount()
 
     def _get_plan_options(self):
         try:
@@ -847,14 +865,16 @@ class MembersView(ft.Column):
         event_bus.unsubscribe("access_scan", self._on_event_refresh)
         event_bus.unsubscribe("members_changed", self._on_event_refresh)
         event_bus.unsubscribe("plans_changed", self._on_plans_event)
+        self.page = None
 
     def _on_event_refresh(self, data=None):
+        if getattr(self, "page", None) is None:
+            return
         self.table_body.controls = self._build_rows()
-        if hasattr(self, "page") and self.page:
-            try:
-                self.table_body.update()
-            except Exception:
-                pass
+        try:
+            self.table_body.update()
+        except Exception:
+            pass
 
     def _open_modal(self, dialog):
         if hasattr(self, "page") and self.page:
@@ -1446,16 +1466,34 @@ class MembersView(ft.Column):
             pass
         nfc_reader.set_enroll_mode(self._on_enrolled_new_member_tag)
 
+    def _on_new_nfc_change(self, e=None):
+        from core.mock_data import find_member_by_nfc_id, normalize_nfc_id
+        val = (self.nfc_field.value or "").strip()
+        clean = normalize_nfc_id(val)
+        if clean:
+            owner = find_member_by_nfc_id(clean)
+            if owner:
+                self.nfc_field.error_text = f"Ocupado: ya pertenece a {owner['nombre']} ({owner['cedula']})"
+                self.nfc_scan_status.value = f"❌ Ocupado: pertenece a {owner['nombre']} (Cédula: {owner['cedula']})"
+                self.nfc_scan_status.color = ACCENT_DANGER
+            else:
+                self.nfc_field.error_text = None
+                self.nfc_scan_status.value = f"✅ Llavero disponible: {clean}"
+                self.nfc_scan_status.color = ACCENT_SUCCESS
+        else:
+            self.nfc_field.error_text = None
+            self.nfc_scan_status.value = "Opcional: Si el socio no tiene llavero, déjalo vacío o presiona el botón para escanear en ACR122U."
+            self.nfc_scan_status.color = TEXT_MUTED
+        try:
+            self.nfc_field.update()
+            self.nfc_scan_status.update()
+        except Exception:
+            pass
+
     def _on_enrolled_new_member_tag(self, uid: str):
-        self.nfc_field.value = uid
-        self.nfc_scan_status.value = f"✅ Llavero detectado: {uid}"
-        self.nfc_scan_status.color = ACCENT_SUCCESS
-        if hasattr(self, "page") and self.page:
-            try:
-                self.nfc_field.update()
-                self.nfc_scan_status.update()
-            except Exception:
-                pass
+        from core.mock_data import normalize_nfc_id
+        self.nfc_field.value = normalize_nfc_id(uid)
+        self._on_new_nfc_change()
 
     def _save_new_member(self, e):
         self.new_member_error_banner.visible = False
@@ -1468,16 +1506,22 @@ class MembersView(ft.Column):
         self.new_pay_ref.error_text = None
 
         prefix = (self.cedula_prefix.value or "V").strip().upper()
-        raw_number = (self.cedula_number.value or "").strip()
+        raw_number = (self.cedula_number.value or "").strip().upper()
         nombre = (self.nombre_field.value or "").strip()
         telefono = (self.telefono_field.value or "").strip()
         plan = (self.plan_field.value or "Basico").strip()
         nfc_id = (self.nfc_field.value or "").strip()
 
         has_error = False
-        digits = "".join(ch for ch in raw_number if ch.isdigit())
-        if len(digits) < 6 or len(digits) > 10:
-            self.cedula_number.error_text = "Debe ingresar entre 6 y 10 dígitos numéricos"
+        # Remove prefix if user typed or pasted prefix inside number field
+        clean_num = raw_number
+        for p in ("V-", "E-", "J-", "G-", "P-", "V", "E", "J", "G", "P"):
+            if clean_num.startswith(p) and len(clean_num) > len(p):
+                clean_num = clean_num[len(p):].lstrip("-")
+                break
+        digits = "".join(ch for ch in clean_num if ch.isalnum())
+        if len(digits) < 4 or len(digits) > 15:
+            self.cedula_number.error_text = "La cédula/documento debe tener entre 4 y 15 dígitos o caracteres"
             has_error = True
 
         if len(nombre) < 3 or not re.search(r"[a-zA-ZáéíóúÁÉÍÓÚñÑ]", nombre):
@@ -1491,6 +1535,8 @@ class MembersView(ft.Column):
             existing_owner = find_member_by_nfc_id(clean_nfc)
             if existing_owner:
                 self.nfc_field.error_text = f"Esta llave NFC ya pertenece a {existing_owner['nombre']} (Cédula: {existing_owner['cedula']})"
+                self.nfc_scan_status.value = f"❌ Ocupado: pertenece a {existing_owner['nombre']} (Cédula: {existing_owner['cedula']})"
+                self.nfc_scan_status.color = ACCENT_DANGER
                 has_error = True
 
         # Validate initial payment
@@ -1512,7 +1558,8 @@ class MembersView(ft.Column):
             has_error = True
 
         if has_error:
-            self.new_member_error_text.value = "Por favor verifique los campos marcados en rojo."
+            err_msg = self.cedula_number.error_text or self.nombre_field.error_text or self.nfc_field.error_text or self.new_pay_amount_usd.error_text or self.new_pay_ref.error_text or "Por favor verifique los campos marcados en rojo."
+            self.new_member_error_text.value = f"⚠️ {err_msg}"
             self.new_member_error_banner.visible = True
             try:
                 self.new_member_error_banner.update()
@@ -1520,11 +1567,14 @@ class MembersView(ft.Column):
                 self.nombre_field.update()
                 self.telefono_field.update()
                 self.nfc_field.update()
+                self.nfc_scan_status.update()
                 self.new_pay_amount_usd.update()
                 self.new_pay_ref.update()
+                if self.page:
+                    self.page.update()
             except Exception:
                 pass
-            self._show_notification("Revise los campos requeridos marcados en rojo.", ACCENT_DANGER)
+            self._show_notification(f"Error: {err_msg}", ACCENT_DANGER)
             return
 
         cedula = f"{prefix}-{digits}"
@@ -1564,7 +1614,10 @@ class MembersView(ft.Column):
             print(f"[MembersView] Error registrando pago inicial: {p_exc}")
 
         self.table_body.controls = self._build_rows()
-        self.table_body.update()
+        try:
+            self.table_body.update()
+        except Exception:
+            pass
 
         self._close_modal(self.new_member_dialog)
         self._show_notification(
@@ -1576,6 +1629,8 @@ class MembersView(ft.Column):
     # EDIT Member Handlers
     # -----------------------------------------------------------------------
     def _open_edit_dialog(self, member: dict):
+        self.edit_member_error_banner.visible = False
+        self.edit_member_error_text.value = ""
         self.edit_cedula_field.value = member.get("cedula", "")
         self.edit_nombre_field.value = member.get("nombre", "")
         self.edit_nombre_field.error_text = None
@@ -1590,6 +1645,31 @@ class MembersView(ft.Column):
         self.edit_nfc_status.value = ""
         self._open_modal(self.edit_member_dialog)
 
+    def _on_edit_nfc_change(self, e=None):
+        from core.mock_data import find_member_by_nfc_id, normalize_nfc_id, normalize_cedula
+        val = (self.edit_nfc_field.value or "").strip()
+        clean = normalize_nfc_id(val)
+        cur_cedula = normalize_cedula(self.edit_cedula_field.value)
+        if clean:
+            owner = find_member_by_nfc_id(clean)
+            if owner and normalize_cedula(owner.get("cedula")) != cur_cedula:
+                self.edit_nfc_field.error_text = f"Ocupado: ya pertenece a {owner['nombre']} ({owner['cedula']})"
+                self.edit_nfc_status.value = f"❌ Ocupado: pertenece a {owner['nombre']} (Cédula: {owner['cedula']})"
+                self.edit_nfc_status.color = ACCENT_DANGER
+            else:
+                self.edit_nfc_field.error_text = None
+                self.edit_nfc_status.value = f"✅ Llavero disponible: {clean}"
+                self.edit_nfc_status.color = ACCENT_SUCCESS
+        else:
+            self.edit_nfc_field.error_text = None
+            self.edit_nfc_status.value = ""
+            self.edit_nfc_status.color = TEXT_MUTED
+        try:
+            self.edit_nfc_field.update()
+            self.edit_nfc_status.update()
+        except Exception:
+            pass
+
     def _start_scan_for_edit_member(self, e):
         self.edit_nfc_status.value = "📡 ACERQUE EL NUEVO LLAVERO AL LECTOR ACR122U..."
         self.edit_nfc_status.color = ACCENT_PRIMARY
@@ -1600,17 +1680,13 @@ class MembersView(ft.Column):
         nfc_reader.set_enroll_mode(self._on_enrolled_edit_member_tag)
 
     def _on_enrolled_edit_member_tag(self, uid: str):
-        self.edit_nfc_field.value = uid
-        self.edit_nfc_status.value = f"✅ Llavero detectado: {uid}"
-        self.edit_nfc_status.color = ACCENT_SUCCESS
-        if hasattr(self, "page") and self.page:
-            try:
-                self.edit_nfc_field.update()
-                self.edit_nfc_status.update()
-            except Exception:
-                pass
+        from core.mock_data import normalize_nfc_id
+        self.edit_nfc_field.value = normalize_nfc_id(uid)
+        self._on_edit_nfc_change()
 
     def _save_edited_member(self, e):
+        self.edit_member_error_banner.visible = False
+        self.edit_member_error_text.value = ""
         self.edit_nombre_field.error_text = None
         self.edit_telefono_field.error_text = None
         self.edit_venc_field.error_text = None
@@ -1643,12 +1719,25 @@ class MembersView(ft.Column):
             existing_owner = find_member_by_nfc_id(clean_nfc)
             if existing_owner and normalize_cedula(existing_owner.get("cedula")) != normalize_cedula(cedula):
                 self.edit_nfc_field.error_text = f"Esta llave NFC ya pertenece a {existing_owner['nombre']} (Cédula: {existing_owner['cedula']})"
+                self.edit_nfc_status.value = f"❌ Ya asignado a {existing_owner['nombre']} (Cédula: {existing_owner['cedula']})"
+                self.edit_nfc_status.color = ACCENT_DANGER
                 has_error = True
 
         if has_error:
-            self.edit_nombre_field.update()
-            self.edit_venc_field.update()
-            self.edit_nfc_field.update()
+            err_msg = self.edit_nfc_field.error_text or self.edit_nombre_field.error_text or self.edit_venc_field.error_text or "Revise los campos en rojo."
+            self.edit_member_error_text.value = f"⚠️ {err_msg}"
+            self.edit_member_error_banner.visible = True
+            try:
+                self.edit_member_error_banner.update()
+                self.edit_nombre_field.update()
+                self.edit_venc_field.update()
+                self.edit_nfc_field.update()
+                self.edit_nfc_status.update()
+                if self.page:
+                    self.page.update()
+            except Exception:
+                pass
+            self._show_notification(f"Error: {err_msg}", ACCENT_DANGER)
             return
 
         try:
@@ -1674,7 +1763,10 @@ class MembersView(ft.Column):
             return
 
         self.table_body.controls = self._build_rows()
-        self.table_body.update()
+        try:
+            self.table_body.update()
+        except Exception:
+            pass
         self._close_modal(self.edit_member_dialog)
         self._show_notification(f"Socio {nombre} actualizado correctamente.", ACCENT_SUCCESS)
 

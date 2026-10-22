@@ -249,6 +249,8 @@ class AuditLogsView(ft.Column):
             spacing=10,
             expand=True,
         )
+        self._load_filter_options()
+        self._load_logs()
 
     def did_mount(self):
         try:
@@ -312,7 +314,11 @@ class AuditLogsView(ft.Column):
                     padding=20,
                 )
             ]
-            self.logs_table.update()
+            if getattr(self, "page", None) is not None:
+                try:
+                    self.logs_table.update()
+                except Exception:
+                    pass
 
     def _render_logs(self):
         if not self._logs:
@@ -332,8 +338,12 @@ class AuditLogsView(ft.Column):
                 )
             ]
             self.count_label.value = "0 registros"
-            self.logs_table.update()
-            self.count_label.update()
+            if getattr(self, "page", None) is not None:
+                try:
+                    self.logs_table.update()
+                    self.count_label.update()
+                except Exception:
+                    pass
             return
 
         rows = []
@@ -426,8 +436,12 @@ class AuditLogsView(ft.Column):
 
         self.logs_table.controls = rows
         self.count_label.value = f"{len(self._logs)} registros"
-        self.logs_table.update()
-        self.count_label.update()
+        if getattr(self, "page", None) is not None:
+            try:
+                self.logs_table.update()
+                self.count_label.update()
+            except Exception:
+                pass
 
     def _on_row_hover(self, e):
         try:

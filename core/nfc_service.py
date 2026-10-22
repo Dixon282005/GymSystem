@@ -97,6 +97,7 @@ class WinSCardDriver:
         self._reader_name_bytes: Optional[bytes] = None
         self.is_connected = False
         self._reader_state = SCARD_READERSTATEA()
+        self._lock = threading.RLock()
         if sys.platform == "win32":
             try:
                 self._winscard = ctypes.windll.winscard
@@ -168,164 +169,170 @@ class WinSCardDriver:
     def connect_reader(self) -> bool:
         if not self._winscard:
             return False
-        try:
-            if self._hContext.value == 0:
-                ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_USER, None, None, ctypes.byref(self._hContext))
-                if ret != 0:
-                    ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_SYSTEM, None, None, ctypes.byref(self._hContext))
-                if ret != 0:
-                    if sys.platform == "win32":
-                        try:
-                            import subprocess
-                            subprocess.run("sc.exe start SCardSvr", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            subprocess.run("net start SCardSvr", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_USER, None, None, ctypes.byref(self._hContext))
-                            if ret != 0:
-                                ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_SYSTEM, None, None, ctypes.byref(self._hContext))
-                        except Exception:
-                            pass
+        with self._lock:
+            try:
+                if self._hContext.value == 0:
+                    ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_USER, None, None, ctypes.byref(self._hContext))
+                    if ret != 0:
+                        ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_SYSTEM, None, None, ctypes.byref(self._hContext))
+                    if ret != 0:
+                        if sys.platform == "win32":
+                            try:
+                                import subprocess
+                                si = subprocess.STARTUPINFO()
+                                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                                si.wShowWindow = subprocess.SW_HIDE
+                                subprocess.run("sc.exe start SCardSvr", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000, startupinfo=si)
+                                subprocess.run("net start SCardSvr", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000, startupinfo=si)
+                                ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_USER, None, None, ctypes.byref(self._hContext))
+                                if ret != 0:
+                                    ret = self._winscard.SCardEstablishContext(SCARD_SCOPE_SYSTEM, None, None, ctypes.byref(self._hContext))
+                            except Exception:
+                                pass
+                    if ret != 0:
+                        self.is_connected = False
+                        return False
+
+                readers_len = DWORD(0)
+                ret = self._winscard.SCardListReadersA(self._hContext, None, None, ctypes.byref(readers_len))
+                if ret != 0 or readers_len.value == 0:
+                    if ret in (0x8010001E, 0x8010001D, -2146435042, -2146435043):
+                        self._close_unlocked()
+                    else:
+                        self.is_connected = False
+                    return False
+
+                buf = ctypes.create_string_buffer(readers_len.value)
+                ret = self._winscard.SCardListReadersA(self._hContext, None, buf, ctypes.byref(readers_len))
                 if ret != 0:
                     self.is_connected = False
                     return False
 
-            readers_len = DWORD(0)
-            ret = self._winscard.SCardListReadersA(self._hContext, None, None, ctypes.byref(readers_len))
-            if ret != 0 or readers_len.value == 0:
-                # If service stopped or context invalidated, reset context
-                if ret in (0x8010001E, 0x8010001D, -2146435042, -2146435043):
-                    self.close()
-                else:
+                raw = buf.raw[: readers_len.value]
+                readers = [r.decode("latin1", errors="ignore") for r in raw.split(b"\x00") if r]
+                if not readers:
                     self.is_connected = False
+                    return False
+
+                chosen = readers[0]
+                for r in readers:
+                    if any(k in r.upper() for k in ("ACR122", "ACS", "PICC", "NFC")):
+                        chosen = r
+                        break
+
+                self.reader_name = chosen
+                self._reader_name_bytes = chosen.encode("latin1") + b"\x00"
+
+                # Initialize reader state for passive monitoring
+                self._reader_state = SCARD_READERSTATEA()
+                self._reader_state.szReader = self._reader_name_bytes
+                self._reader_state.dwCurrentState = SCARD_STATE_UNAWARE
+
+                # Initial query (0 timeout) to initialize state
+                self._winscard.SCardGetStatusChangeA(
+                    self._hContext,
+                    0,
+                    ctypes.byref(self._reader_state),
+                    1,
+                )
+                self._reader_state.dwCurrentState = self._reader_state.dwEventState
+
+                self.is_connected = True
+                return True
+            except Exception as e:
+                logger.debug(f"[NFC] Excepción en connect_reader: {e}")
+                self._close_unlocked()
                 return False
-
-            buf = ctypes.create_string_buffer(readers_len.value)
-            ret = self._winscard.SCardListReadersA(self._hContext, None, buf, ctypes.byref(readers_len))
-            if ret != 0:
-                self.is_connected = False
-                return False
-
-            raw = buf.raw[: readers_len.value]
-            readers = [r.decode("latin1", errors="ignore") for r in raw.split(b"\x00") if r]
-            if not readers:
-                self.is_connected = False
-                return False
-
-            chosen = readers[0]
-            for r in readers:
-                if any(k in r.upper() for k in ("ACR122", "ACS", "PICC", "NFC")):
-                    chosen = r
-                    break
-
-            self.reader_name = chosen
-            self._reader_name_bytes = chosen.encode("latin1") + b"\x00"
-
-            # Initialize reader state for passive monitoring
-            self._reader_state = SCARD_READERSTATEA()
-            self._reader_state.szReader = self._reader_name_bytes
-            self._reader_state.dwCurrentState = SCARD_STATE_UNAWARE
-
-            # Initial query (0 timeout) to initialize state
-            self._winscard.SCardGetStatusChangeA(
-                self._hContext,
-                0,
-                ctypes.byref(self._reader_state),
-                1,
-            )
-            self._reader_state.dwCurrentState = self._reader_state.dwEventState
-
-            self.is_connected = True
-            return True
-        except Exception as e:
-            logger.debug(f"[NFC] Excepción en connect_reader: {e}")
-            self.close()
-            return False
 
     def poll_card(self) -> Optional[bytes]:
         """Poll for card and return UID bytes only when card is physically present."""
         if not self._winscard:
             return None
-        if not self.is_connected or self._hContext.value == 0 or not self._reader_name_bytes:
-            if not self.connect_reader():
+
+        with self._lock:
+            if not self.is_connected or self._hContext.value == 0 or not self._reader_name_bytes:
+                if not self.connect_reader():
+                    return None
+
+            # Passively wait for state change (50ms responsive timeout)
+            ret = self._winscard.SCardGetStatusChangeA(
+                self._hContext,
+                50,
+                ctypes.byref(self._reader_state),
+                1,
+            )
+
+            if ret != 0:
+                # SCARD_E_TIMEOUT (0x8010000A / -2146435062) -> Normal timeout, no card tapped
+                if ret in (0x8010000A, -2146435062) or (ret & 0xFFFFFFFF) == 0x8010000A:
+                    return None
+                # Service died or completely stopped
+                if ret in (0x8010001E, 0x8010001D, -2146435042, -2146435043):
+                    self._close_unlocked()
+                    return None
                 return None
 
-        # Passively wait for state change (up to 200ms) without creating or breaking connections
-        ret = self._winscard.SCardGetStatusChangeA(
-            self._hContext,
-            200,
-            ctypes.byref(self._reader_state),
-            1,
-        )
+            event_state = self._reader_state.dwEventState
+            self._reader_state.dwCurrentState = event_state
 
-        if ret != 0:
-            # SCARD_E_TIMEOUT (0x8010000A / -2146435062) -> Normal timeout, no card tapped
-            if ret in (0x8010000A, -2146435062) or (ret & 0xFFFFFFFF) == 0x8010000A:
-                return None
-            # Service died or reader unplugged
-            if ret in (0x8010001E, 0x80100017, 0x8010001D, -2146435042, -2146435049, -2146435043):
-                self.close()
-                return None
+            # Card is present on antenna
+            if event_state & SCARD_STATE_PRESENT:
+                hCard = SCARDHANDLE(0)
+                active_proto = DWORD(0)
+                ret_conn = self._winscard.SCardConnectA(
+                    self._hContext,
+                    self._reader_name_bytes,
+                    SCARD_SHARE_SHARED,
+                    SCARD_PROTOCOL_TX,
+                    ctypes.byref(hCard),
+                    ctypes.byref(active_proto),
+                )
+                if ret_conn != 0:
+                    return None
+
+                try:
+                    io_req = SCARD_IO_REQUEST(
+                        active_proto.value if active_proto.value != 0 else 1,
+                        ctypes.sizeof(SCARD_IO_REQUEST),
+                    )
+                    recv_buf = ctypes.create_string_buffer(258)
+                    recv_len = DWORD(258)
+
+                    tx_ret = self._winscard.SCardTransmit(
+                        hCard,
+                        ctypes.byref(io_req),
+                        APDU_GET_UID,
+                        len(APDU_GET_UID),
+                        None,
+                        recv_buf,
+                        ctypes.byref(recv_len),
+                    )
+
+                    if tx_ret == 0 and recv_len.value >= 2:
+                        resp = bytes(recv_buf.raw[: recv_len.value])
+                        if resp[-2:] == b"\x90\x00":
+                            return resp[:-2]
+                finally:
+                    try:
+                        self._winscard.SCardDisconnect(hCard, SCARD_LEAVE_CARD)
+                    except Exception:
+                        pass
+
             return None
 
-        event_state = self._reader_state.dwEventState
-        self._reader_state.dwCurrentState = event_state
-
-        # Card is present on antenna
-        if event_state & SCARD_STATE_PRESENT:
-            hCard = SCARDHANDLE(0)
-            active_proto = DWORD(0)
-            ret_conn = self._winscard.SCardConnectA(
-                self._hContext,
-                self._reader_name_bytes,
-                SCARD_SHARE_SHARED,
-                SCARD_PROTOCOL_TX,
-                ctypes.byref(hCard),
-                ctypes.byref(active_proto),
-            )
-            if ret_conn != 0:
-                return None
-
-            try:
-                io_req = SCARD_IO_REQUEST(
-                    active_proto.value if active_proto.value != 0 else 1,
-                    ctypes.sizeof(SCARD_IO_REQUEST),
-                )
-                recv_buf = ctypes.create_string_buffer(258)
-                recv_len = DWORD(258)
-
-                tx_ret = self._winscard.SCardTransmit(
-                    hCard,
-                    ctypes.byref(io_req),
-                    APDU_GET_UID,
-                    len(APDU_GET_UID),
-                    None,
-                    recv_buf,
-                    ctypes.byref(recv_len),
-                )
-
-                if tx_ret == 0 and recv_len.value >= 2:
-                    resp = bytes(recv_buf.raw[: recv_len.value])
-                    if resp[-2:] == b"\x90\x00":
-                        return resp[:-2]
-            finally:
-                self._winscard.SCardDisconnect(hCard, SCARD_LEAVE_CARD)
-
-        return None
-
     def send_buzzer(self, apdu: bytes):
-        """Send buzzer / LED pseudo-APDU directly to the ACR122U."""
+        """Send buzzer / LED pseudo-APDU directly to the ACR122U in a thread-safe manner."""
         if not self._winscard or not self._reader_name_bytes or self._hContext.value == 0:
             return
-        hCard = SCARDHANDLE(0)
-        active_proto = DWORD(0)
-        ret = self._winscard.SCardConnectA(
-            self._hContext,
-            self._reader_name_bytes,
-            SCARD_SHARE_SHARED,
-            SCARD_PROTOCOL_TX,
-            ctypes.byref(hCard),
-            ctypes.byref(active_proto),
-        )
-        if ret != 0:
+
+        with self._lock:
+            if not self._winscard or not self._reader_name_bytes or self._hContext.value == 0:
+                return
+
+            hCard = SCARDHANDLE(0)
+            active_proto = DWORD(0)
+
+            # Try DIRECT connection first (proper mode for ACR122U escape commands)
             ret = self._winscard.SCardConnectA(
                 self._hContext,
                 self._reader_name_bytes,
@@ -334,29 +341,43 @@ class WinSCardDriver:
                 ctypes.byref(hCard),
                 ctypes.byref(active_proto),
             )
-        if ret == 0:
-            try:
-                io_req = SCARD_IO_REQUEST(
-                    active_proto.value if active_proto.value != 0 else 1,
-                    ctypes.sizeof(SCARD_IO_REQUEST),
+            if ret != 0:
+                # Fallback to SHARED if DIRECT is unsupported by host driver
+                ret = self._winscard.SCardConnectA(
+                    self._hContext,
+                    self._reader_name_bytes,
+                    SCARD_SHARE_SHARED,
+                    SCARD_PROTOCOL_TX,
+                    ctypes.byref(hCard),
+                    ctypes.byref(active_proto),
                 )
-                recv_buf = ctypes.create_string_buffer(258)
-                recv_len = DWORD(258)
-                self._winscard.SCardTransmit(
-                    hCard,
-                    ctypes.byref(io_req),
-                    apdu,
-                    len(apdu),
-                    None,
-                    recv_buf,
-                    ctypes.byref(recv_len),
-                )
-            except Exception:
-                pass
-            finally:
-                self._winscard.SCardDisconnect(hCard, SCARD_LEAVE_CARD)
 
-    def close(self):
+            if ret == 0:
+                try:
+                    io_req = SCARD_IO_REQUEST(
+                        active_proto.value if active_proto.value != 0 else 1,
+                        ctypes.sizeof(SCARD_IO_REQUEST),
+                    )
+                    recv_buf = ctypes.create_string_buffer(258)
+                    recv_len = DWORD(258)
+                    self._winscard.SCardTransmit(
+                        hCard,
+                        ctypes.byref(io_req),
+                        apdu,
+                        len(apdu),
+                        None,
+                        recv_buf,
+                        ctypes.byref(recv_len),
+                    )
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        self._winscard.SCardDisconnect(hCard, SCARD_LEAVE_CARD)
+                    except Exception:
+                        pass
+
+    def _close_unlocked(self):
         if self._winscard and self._hContext.value != 0:
             try:
                 self._winscard.SCardReleaseContext(self._hContext)
@@ -366,6 +387,10 @@ class WinSCardDriver:
         self.is_connected = False
         self.reader_name = None
         self._reader_name_bytes = None
+
+    def close(self):
+        with self._lock:
+            self._close_unlocked()
 
 
 class NfcService:

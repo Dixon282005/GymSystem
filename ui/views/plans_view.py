@@ -214,11 +214,16 @@ class PlansView(ft.Column):
     def will_unmount(self):
         event_bus.unsubscribe("plans_changed", self._on_plans_changed)
         event_bus.unsubscribe("bcv_updated", self._on_bcv_updated)
+        self.page = None
 
     def _on_plans_changed(self, data=None):
+        if getattr(self, "page", None) is None:
+            return
         self._refresh_plans()
 
     def _on_bcv_updated(self, rate=None):
+        if getattr(self, "page", None) is None:
+            return
         curr_rate = bcv_service.get_rate()
         self.bcv_badge.content = ft.Row(
             controls=[

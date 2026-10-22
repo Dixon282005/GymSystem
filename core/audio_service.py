@@ -13,7 +13,10 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
+
+CREATE_NO_WINDOW = 0x08000000
 
 # Local cache directory for instant audio playback without network latency
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "audio"
@@ -119,7 +122,17 @@ class AudioService:
                 "-Command",
                 f"(New-Object -ComObject SAPI.SpVoice).Speak('{safe_text}')",
             ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = subprocess.SW_HIDE
+            subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=4,
+                creationflags=CREATE_NO_WINDOW,
+                startupinfo=si,
+            )
             return True
         except Exception:
             return False
@@ -159,17 +172,26 @@ class AudioService:
                 pass
             return False
 
-        # On Windows, play via native winmm.dll or PowerShell MediaPlayer
+        # On Windows, play via native winmm.dll or windowless PowerShell MediaPlayer
         if os.name == "nt":
             try:
                 import ctypes
                 winmm = ctypes.windll.winmm
-                alias = f"gymsis_mp3_{threading.get_ident()}"
+                alias = f"gymsis_a_{int(time.time() * 1000) % 100000}"
                 winmm.mciSendStringW(f'close {alias}', None, 0, None)
-                ret = winmm.mciSendStringW(f'open "{cache_file}" type mpegvideo alias {alias}', None, 0, None)
+                abs_path = str(cache_file.resolve())
+                ret = winmm.mciSendStringW(f'open "{abs_path}" type mpegvideo alias {alias}', None, 0, None)
                 if ret == 0:
-                    winmm.mciSendStringW(f'play {alias} wait', None, 0, None)
-                    winmm.mciSendStringW(f'close {alias}', None, 0, None)
+                    winmm.mciSendStringW(f'play {alias}', None, 0, None)
+
+                    def _cleanup_alias(a=alias):
+                        time.sleep(3.5)
+                        try:
+                            winmm.mciSendStringW(f'close {a}', None, 0, None)
+                        except Exception:
+                            pass
+
+                    threading.Thread(target=_cleanup_alias, daemon=True, name="AudioMCICleanup").start()
                     return True
             except Exception:
                 pass
@@ -178,15 +200,19 @@ class AudioService:
                 ps_cmd = (
                     f"Add-Type -AssemblyName presentationCore; "
                     f"$p = New-Object System.Windows.Media.MediaPlayer; "
-                    f"$p.Open([System.Uri]'{cache_file}'); $p.Play(); "
-                    f"Start-Sleep -Seconds 4; $p.Close()"
+                    f"$p.Open([System.Uri]'{cache_file.resolve()}'); $p.Play(); "
                 )
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = subprocess.SW_HIDE
                 res = subprocess.run(
                     ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     check=False,
-                    timeout=6,
+                    timeout=2,
+                    creationflags=CREATE_NO_WINDOW,
+                    startupinfo=si,
                 )
                 if res.returncode == 0:
                     return True
@@ -265,3 +291,4 @@ class AudioService:
 
 # Global singleton instance
 audio = AudioService()
+audio_service = audio

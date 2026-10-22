@@ -455,16 +455,18 @@ class ReportsView(ft.Column):
                 if self.date_picker in self.page.overlay:
                     self.page.overlay.remove(self.date_picker)
                 self._dialogs_attached = False
+            self.page = None
         except Exception:
             pass
 
     def _on_event_refresh(self, data=None):
+        if getattr(self, "page", None) is None:
+            return
         try:
             self._bcv_rate = bcv_service.get_rate()
             self._load_report_data()
             self._load_retention_data()
-            if hasattr(self, "page") and self.page:
-                self.update()
+            self.update()
         except Exception as ex:
             print(f"[ReportsView._on_event_refresh] Error: {ex}")
 

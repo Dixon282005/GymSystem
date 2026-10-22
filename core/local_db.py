@@ -405,7 +405,7 @@ def get_last_checkin(cedula: str) -> Optional[dict]:
             """
             SELECT cedula, nombre, plan, status, event_time
             FROM access_log
-            WHERE cedula = ? AND status = 'PERMITIDO'
+            WHERE cedula = ? AND status IN ('ENTRADA', 'PERMITIDO', 'CONCEDIDO', 'ACCESO', 'GRANTED')
             ORDER BY event_time DESC
             LIMIT 1
             """,
@@ -428,7 +428,7 @@ def get_last_checkins_for_cedulas(cedulas: List[str]) -> Dict[str, dict]:
             f"""
             SELECT cedula, MAX(event_time) AS event_time
             FROM access_log
-            WHERE status = 'PERMITIDO' AND cedula IN ({placeholders})
+            WHERE status IN ('ENTRADA', 'PERMITIDO', 'CONCEDIDO', 'ACCESO', 'GRANTED') AND cedula IN ({placeholders})
             GROUP BY cedula
             """,
             normalized,
@@ -438,7 +438,7 @@ def get_last_checkins_for_cedulas(cedulas: List[str]) -> Dict[str, dict]:
             et = r["event_time"] or ""
             result[r["cedula"]] = {
                 "cedula": r["cedula"],
-                "status": "PERMITIDO",
+                "status": "ENTRADA",
                 "hora": et[11:16] if et else "",
                 "fecha": et[:10] if et else "",
                 "event_time": et,
@@ -459,7 +459,7 @@ def list_members_low_attendance(
             LEFT JOIN (
                 SELECT cedula, MAX(event_time) AS last_checkin
                 FROM access_log
-                WHERE status = 'PERMITIDO'
+                WHERE status IN ('ENTRADA', 'PERMITIDO', 'CONCEDIDO', 'ACCESO', 'GRANTED')
                 GROUP BY cedula
             ) lc ON lc.cedula = m.cedula
             WHERE m.estado IN ({placeholders})

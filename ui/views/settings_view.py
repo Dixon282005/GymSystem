@@ -132,7 +132,7 @@ class SettingsView(ft.Column):
             width=200,
         )
         self.bcv_info_text = ft.Text(
-            f"Última actualización: {bcv_service.get_last_updated()} (Fuente: {bcv_service.get_source()})",
+            f"Última actualización: {bcv_service.get_last_updated()} (Fuente: {bcv_service.get_source()}) • Consulta automática: Activa (al abrir y a cada :00 / :30)",
             size=12,
             color=TEXT_MUTED,
         )
@@ -364,6 +364,15 @@ class SettingsView(ft.Column):
             ),
         ]
 
+    def did_mount(self):
+        from core.event_bus import event_bus
+        event_bus.subscribe("bcv_updated", self._on_bcv_updated)
+
+    def will_unmount(self):
+        from core.event_bus import event_bus
+        event_bus.unsubscribe("bcv_updated", self._on_bcv_updated)
+        self.page = None
+
     def _save_manual_bcv(self, e):
         self.bcv_rate_field.error_text = None
         raw = (self.bcv_rate_field.value or "").replace(",", ".").strip()
@@ -392,6 +401,26 @@ class SettingsView(ft.Column):
                 pass
 
         self._show_toast(f"Tasa BCV manual establecida en {val:.2f} Bs/USD", ACCENT_SUCCESS)
+
+    def _on_bcv_updated(self, rate=None):
+        if getattr(self, "page", None) is None:
+            return
+        if rate is None:
+            rate = bcv_service.get_rate()
+        self.bcv_current_badge.value = f"{rate:.2f} Bs/USD"
+        self.bcv_rate_field.value = f"{rate:.2f}"
+        info_str = f"Última actualización: {bcv_service.get_last_updated()} (Fuente: {bcv_service.get_source()}) • Consulta automática: Activa (al abrir y a cada :00 / :30)"
+        fv = bcv_service.get_fecha_valor()
+        if fv:
+            info_str += f" • Fecha Valor: {fv}"
+        self.bcv_info_text.value = info_str
+        if hasattr(self, "page") and self.page:
+            try:
+                self.bcv_current_badge.update()
+                self.bcv_rate_field.update()
+                self.bcv_info_text.update()
+            except Exception:
+                pass
 
     def _sync_bcv_api(self, e):
         self._show_toast("Consultando tasa oficial del BCV...", ACCENT_INFO)

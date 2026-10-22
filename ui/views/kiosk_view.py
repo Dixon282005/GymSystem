@@ -506,22 +506,28 @@ class KioskView(ft.Container):
         from core.event_bus import event_bus
         event_bus.unsubscribe("access_scan", self._on_event_bus_scan)
         event_bus.unsubscribe("members_changed", self._on_event_bus_members_changed)
+        self.page = None
 
     def _on_event_bus_scan(self, result: dict):
+        if getattr(self, "page", None) is None:
+            return
         self._display_scan_result(result)
 
     def _on_event_bus_members_changed(self, member):
+        if getattr(self, "page", None) is None:
+            return
         self._refresh_counters()
-        if hasattr(self, "page") and self.page:
-            try:
-                self.active_now_label.update()
-                self.total_today_label.update()
-            except Exception:
-                pass
+        try:
+            self.active_now_label.update()
+            self.total_today_label.update()
+        except Exception:
+            pass
 
     def _on_nfc_scan(self, uid: str):
         """Dispatched from the background NFC thread when a tag touches the ACR122U."""
-        process_nfc_scan(uid, min_interval=3.0)
+        result = process_nfc_scan(uid, min_interval=3.0)
+        if result and getattr(self, "page", None) is not None:
+            self._display_scan_result(result)
 
     def _handle_manual_input(self, e):
         raw = (self.manual_input.value or "").strip()
@@ -533,7 +539,9 @@ class KioskView(ft.Container):
         except Exception:
             pass
 
-        process_nfc_scan(raw)
+        result = process_nfc_scan(raw)
+        if result and getattr(self, "page", None) is not None:
+            self._display_scan_result(result)
 
     def _display_scan_result(self, result: dict):
         action = result.get("action", "ENTRADA" if result.get("allowed") else "DENEGADO")
@@ -556,7 +564,7 @@ class KioskView(ft.Container):
         self._refresh_counters()
         self.recent_list.controls = self._build_recent_chips()
 
-        if hasattr(self, "page") and self.page:
+        if getattr(self, "page", None) is not None:
             try:
                 self.hero_container.update()
                 self.active_now_label.update()
@@ -574,14 +582,15 @@ class KioskView(ft.Container):
         self._reset_timer.start()
 
     def _reset_to_idle(self):
+        if getattr(self, "page", None) is None:
+            return
         self.hero_container.content = self._build_idle_hero()
         self.hero_container.border = ft.Border.all(1.5, BORDER)
         self.hero_container.bgcolor = BG_CARD
-        if hasattr(self, "page") and self.page:
-            try:
-                self.hero_container.update()
-            except Exception:
-                pass
+        try:
+            self.hero_container.update()
+        except Exception:
+            pass
 
     def _refresh_counters(self):
         snap = build_access_snapshot()

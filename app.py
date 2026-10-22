@@ -234,29 +234,44 @@ class GymsisApp:
     def _route_to(self, route: str):
         clean_route = (route or "/").strip().lower()
 
-        if clean_route.startswith("/kiosk"):
-            self._show_kiosk_view()
-        elif clean_route.startswith("/admin") or clean_route in ("/", ""):
+        if clean_route.startswith("/admin"):
             if not self.is_admin_authenticated:
                 self._show_login_view()
             else:
                 self._show_admin_layout()
         else:
-            if not self.is_admin_authenticated:
-                self._show_login_view()
-            else:
-                self._show_admin_layout()
+            # Default route: Public Client Entrance Kiosk
+            self._show_kiosk_view()
 
     # -----------------------------------------------------------------------
     # Route 1: Public Client Entrance Kiosk
     # -----------------------------------------------------------------------
 
     def _show_kiosk_view(self):
+        prev_view = getattr(self.view_container, "content", None)
+        if prev_view and hasattr(prev_view, "will_unmount"):
+            try:
+                prev_view.will_unmount()
+            except Exception:
+                pass
+        self.view_container.content = None
+
+        if self.kiosk_view and hasattr(self.kiosk_view, "will_unmount"):
+            try:
+                self.kiosk_view.will_unmount()
+            except Exception:
+                pass
+
         self.page.clean()
         self.kiosk_view = KioskView(on_admin_click=self._handle_go_to_admin)
         self.page.add(self.kiosk_view)
         nfc_reader.access_callback = self.kiosk_view._on_nfc_scan
         nfc_reader.status_callback = self.kiosk_view._on_nfc_status_change
+        if hasattr(self.kiosk_view, "did_mount"):
+            try:
+                self.kiosk_view.did_mount()
+            except Exception:
+                pass
         if nfc_reader.is_connected:
             self.kiosk_view._on_nfc_status_change(True, "ACR122U Activo")
         self.page.update()
@@ -269,18 +284,44 @@ class GymsisApp:
         self.page.route = "/kiosk"
         self._route_to("/kiosk")
 
+    def _get_kiosk_url(self) -> str:
+        import os
+        import urllib.parse
+        port = os.getenv("GYMSIS_PORT", "8550")
+        host = os.getenv("GYMSIS_HOST", "localhost")
+        if host in ("0.0.0.0", "::"):
+            host = "localhost"
+
+        scheme = "http"
+        netloc = f"{host}:{port}"
+        if hasattr(self, "page") and self.page and getattr(self.page, "url", None):
+            try:
+                parsed = urllib.parse.urlparse(self.page.url)
+                if parsed.netloc:
+                    netloc = parsed.netloc.replace("0.0.0.0", "localhost")
+                if parsed.scheme in ("wss", "https"):
+                    scheme = "https"
+                else:
+                    scheme = "http"
+            except Exception:
+                pass
+
+        return f"{scheme}://{netloc}/kiosk"
+
     def _handle_open_kiosk_new_window(self, e=None):
-        try:
-            self.page.route = "/kiosk"
-            self._show_kiosk_view()
-        except Exception as ex:
-            print(f"[app] Error launching kiosk: {ex}")
+        pass
 
     # -----------------------------------------------------------------------
     # Route 2: Admin Login & Backoffice
     # -----------------------------------------------------------------------
 
     def _show_login_view(self):
+        if self.kiosk_view and hasattr(self.kiosk_view, "will_unmount"):
+            try:
+                self.kiosk_view.will_unmount()
+            except Exception:
+                pass
+        self.kiosk_view = None
         self.page.clean()
         login_view = LoginView(
             on_login=self._handle_admin_login,
@@ -395,6 +436,12 @@ class GymsisApp:
         self._show_login_view()
 
     def _show_admin_layout(self):
+        if self.kiosk_view and hasattr(self.kiosk_view, "will_unmount"):
+            try:
+                self.kiosk_view.will_unmount()
+            except Exception:
+                pass
+        self.kiosk_view = None
         self.page.clean()
 
         # RBAC: compute accessible views according to user permissions
@@ -471,6 +518,7 @@ class GymsisApp:
         sidebar_controls.append(ft.Container(expand=True))
 
         # Bottom open kiosk in new window button
+        kiosk_url = self._get_kiosk_url()
         sidebar_controls.append(
             ft.Container(
                 content=ft.ElevatedButton(
@@ -488,6 +536,7 @@ class GymsisApp:
                         side=ft.BorderSide(1, BORDER),
                     ),
                     tooltip="Abrir pantalla de acceso de clientes",
+                    url=kiosk_url,
                     on_click=self._handle_open_kiosk_new_window,
                 ),
                 padding=ft.padding.symmetric(horizontal=16, vertical=8),
@@ -531,6 +580,7 @@ class GymsisApp:
             border=ft.Border.all(1, BORDER),
         )
 
+        kiosk_url = self._get_kiosk_url()
         return ft.Container(
             content=ft.Row(
                 controls=[
@@ -548,6 +598,7 @@ class GymsisApp:
                         ),
                         bgcolor=ACCENT_PRIMARY,
                         tooltip="Ir a Pantalla de Entrada de Socios (Kiosco)",
+                        url=kiosk_url,
                         on_click=self._handle_open_kiosk_new_window,
                     ),
                     ft.Container(width=6),
@@ -599,9 +650,22 @@ class GymsisApp:
         for i, item in enumerate(self.sidebar_items):
             item.set_active(i == index)
 
+        prev_view = getattr(self.view_container, "content", None)
+        if prev_view and hasattr(prev_view, "will_unmount"):
+            try:
+                prev_view.will_unmount()
+            except Exception:
+                pass
+
         view_class = self.allowed_views[index]["view"]
         new_view = view_class()
         self.view_container.content = new_view
+
+        if hasattr(new_view, "did_mount"):
+            try:
+                new_view.did_mount()
+            except Exception:
+                pass
 
         nfc_reader.set_access_mode()
         if isinstance(new_view, AccessView):

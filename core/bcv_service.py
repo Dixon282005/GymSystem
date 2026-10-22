@@ -33,6 +33,8 @@ class BCVService:
         self._fecha_valor: Optional[str] = None
         self._source: str = "Inicial"
         self._lock = threading.Lock()
+        self._sync_thread: Optional[threading.Thread] = None
+        self._stop_event: Optional[threading.Event] = None
         self._load_from_db()
 
     def _load_from_db(self):
@@ -256,7 +258,64 @@ class BCVService:
         bs = self.to_bs(usd_amount)
         return f"${usd_amount:.2f} · {self.format_bs(bs)}"
 
+    def start_auto_sync(self) -> None:
+        """Start background daemon thread that updates the exchange rate at startup and on every half-hour (:00, :30)."""
+        with self._lock:
+            if self._sync_thread and self._sync_thread.is_alive():
+                return
+            self._stop_event = threading.Event()
+            self._sync_thread = threading.Thread(
+                target=self._auto_sync_loop,
+                name="BCV-AutoSync",
+                daemon=True,
+            )
+            self._sync_thread.start()
+            logger.info("[BCV] Auto-sincronización de tasa BCV iniciada (al abrir y a cada :00 / :30 de hora).")
+
+    def stop_auto_sync(self) -> None:
+        """Signal background sync thread to stop."""
+        if self._stop_event:
+            self._stop_event.set()
+
+    def _auto_sync_loop(self) -> None:
+        # Initial sync after brief 2-second delay to ensure GUI initializes first
+        if self._stop_event.wait(timeout=2.0):
+            return
+
+        try:
+            logger.info("[BCV] Sincronización automática inicial al abrir la aplicación...")
+            self.fetch_official_rate()
+        except Exception as e:
+            logger.debug(f"[BCV] Sincronización inicial omitida: {e}")
+
+        while not self._stop_event.is_set():
+            now = datetime.now()
+            # Calculate next target: either minute 30 of current hour or minute 0 of next hour
+            if now.minute < 30:
+                next_target = now.replace(minute=30, second=0, microsecond=0)
+            else:
+                next_target = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+
+            sleep_seconds = (next_target - now).total_seconds()
+            if sleep_seconds < 10:
+                sleep_seconds += 1800  # Avoid rapid loops right on the boundary
+
+            logger.info(
+                f"[BCV] Próxima consulta de tasa programada a las {next_target.strftime('%H:%M:%S')} "
+                f"(en {int(sleep_seconds // 60)} min {int(sleep_seconds % 60)} seg)."
+            )
+
+            if self._stop_event.wait(timeout=sleep_seconds):
+                break
+
+            try:
+                logger.info(f"[BCV] Ejecutando consulta de tasa periódica ({datetime.now().strftime('%H:%M')})...")
+                self.fetch_official_rate()
+            except Exception as e:
+                logger.debug(f"[BCV] Consulta periódica omitida o falló: {e}")
+
 
 # Global singleton instance
 bcv_service = BCVService()
+
 

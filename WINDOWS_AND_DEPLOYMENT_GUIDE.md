@@ -4,22 +4,21 @@ Esta guía detalla las tres maneras de utilizar Gymsis en producción o en recep
 
 ---
 
-## Opción 1: Ejecución Inmediata en Windows (Recomendada - 1 Clic)
+## Opción 1: Ejecución Inmediata en Windows (1 Clic)
 
-No requiere compilación previa y abre Gymsis directamente como **App de Escritorio Nativa** (sin necesidad de navegador):
+No requiere compilación previa y abre Gymsis directamente en tu navegador en `http://localhost:8550/`:
 
 1. Abre la carpeta del proyecto en Windows.
 2. Haz doble clic en el archivo:
    ```cmd
-   Gymsis_Windows_Launcher.bat
+   Gymsis_Web_Server.bat
    ```
 3. El lanzador:
-   - Cierra automáticamente cualquier proceso viejo o instancia zombi de Python que tenga ocupado el puerto `8550`.
-   - Verifica tu entorno virtual `.venv` e instala las dependencias necesarias.
-   - Te permite elegir entre:
-     - **Opción 1 (Predeterminada):** Ventana de Escritorio Nativa (App de escritorio tradicional, rápida, sin navegador).
-     - **Opción 2:** Servidor Web local en `http://localhost:8550/` (ideal si deseas conectar tablets o el Kiosco remoto).
-4. Al cerrar la ventana, el sistema cierra ordenadamente y sincroniza la base de datos `data/gymsis.db` en modo WAL sin pérdida de información.
+   - Activa el servicio de SmartCard para el lector NFC ACS ACR122U.
+   - Cierra automáticamente cualquier proceso huérfano que tenga ocupado el puerto `8550`.
+   - Verifica tu entorno virtual `.venv` e instala dependencias si es necesario.
+   - Inicia el servidor web e inmediatamente abre el navegador en `http://localhost:8550/`.
+4. Al cerrar la ventana presionando cualquier tecla, el sistema cierra ordenadamente y sincroniza la base de datos `data/gymsis.db` en modo WAL sin pérdida de información.
 
 ---
 
